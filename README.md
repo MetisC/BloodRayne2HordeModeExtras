@@ -8,9 +8,16 @@ system `dinput8.dll` and coexists with other proxies (e.g. `binkw32.dll`).
 ## What it adds
 
 - **Challenge Mode** entry on the main menu, before Extras:
-  - Horde arenas — 15 / 25 / 50 / 100 enemies
-  - Mansion battles — 15 / 25 / 50 / 100 enemies
-  - Survival — Infinite
+  - **Arena** cycler — story levels retargeted as wave arenas:
+    Mansion Battle, Mansion - Ballroom, Mansion - Roof, Meatpacking,
+    Union Station - Abandoned Shopping Plaza,
+    Wetworks - Chemical Processing, Kagan's Tower - Skybridge
+  - **Enemies** cycler — 15 / 25 / 50 / 100 per arena
+  - **Start Challenge** launches the selected combo; the menu shows the
+    best time stored for it
+  - Fixed **Boss:** rows at the end (Zerenski, Slezz, Ephemera,
+    Unraveller) — the native story fights, no enemy cycling; killing the
+    boss returns to the challenge menu
 - **Extra Mode** entries inside the native Extras menu (story mode, museum,
   dev/testing levels).
 - Global **Difficulty** option under Options — real gameplay scaling, not

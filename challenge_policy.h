@@ -10,6 +10,10 @@ static bool IsStandaloneChallengeLevel(const char* name) {
         if (*p=='\\' || *p=='/') basename=p+1;
     static const char battlePrefix[] = "A1_MANSION_PART1_BATTLE_";
     if (!_strnicmp(basename,battlePrefix,sizeof battlePrefix-1)) return true;
+    // CHB_* = challenge arenas built by this mod (story levels retargeted to
+    // a wave-completion script). Boss entries keep their story names; they
+    // are added to this list explicitly as they ship.
+    if (!_strnicmp(basename,"chb_",4)) return true;
     if (!_strnicmp(basename,"spawn_",6)) return true;
     static const char* const hubs[] = {"hub1.lvl","hub2.lvl","hub3.lvl","hub4.lvl"};
     for (unsigned i=0;i<sizeof hubs/sizeof hubs[0];++i)

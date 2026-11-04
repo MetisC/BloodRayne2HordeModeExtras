@@ -37,11 +37,11 @@ import argparse
 
 # ---------------------------------------------------------------- manifest
 
-ARENAS = ["SPAWN_EASY", "SPAWN_NORMAL", "SPAWN_HARD", "SPAWN_EXTREME"]
+ARENAS = []   # dev-test horde arenas dropped from the menu
 BATTLES = ["A1_MANSION_PART1_BATTLE_EASY", "A1_MANSION_PART1_BATTLE_NORMAL",
            "A1_MANSION_PART1_BATTLE_HARD", "A1_MANSION_PART1_BATTLE_EXTREME"]
 EXTRA = ["A1_MANSION_PART1O", "A1_MANSION_PART1_STORYMODE12"]
-HUBS = ["HUB1", "HUB2", "HUB3", "HUB4", "HUB5"]
+HUBS = ["HUB5"]   # HUB1-4 dropped: cyclers launch the battle lvls directly
 
 COPY = []
 for n in ARENAS + BATTLES + EXTRA + HUBS:
@@ -61,7 +61,6 @@ DERIVE = {  # output base -> (source base, old, new)
                                      b"EXTREME", b"EXTR"),
     # The 250-kill tier is the usermod's own extreme configuration (its
     # LVL already says maxNumberSpawn=250) with the internal refs renamed.
-    "SPAWN_250": ("SPAWN_EXTREME", b"spawn_extreme", b"spawn_250"),
 }
 
 # SCB equal-length replacements (script strings must keep their declared
@@ -79,34 +78,19 @@ SCB_CALLS = [(b"display(done)", b"display(    )"),
 LVL_PATCH = {
     "A1_MANSION_PART1_BATTLE_EXTR.LVL":
         [(b"\t99    // maxNumberSpawn", b"\t100    // maxNumberSpawn")],
-    "SPAWN_EXTREME.LVL":
-        [(b"\t250    // maxNumberSpawn", b"\t100    // maxNumberSpawn")],
-    # spawn_250 keeps the usermod's ORIGINAL 250 cap: when --src is an
-    # already-deployed world\ (patched to 100) this restores it.
-    "SPAWN_250.LVL":
-        [(b"\t100    // maxNumberSpawn", b"\t250    // maxNumberSpawn")],
 }
 
 # files the mod pipeline rewrote in text mode (CRLF collapsed to LF)
-LINEFEED = {"SPAWN_EXTREME.LVL", "SPAWN_250.LVL"}
+LINEFEED = set()
 
 # language dirs: copy every usermod .TXT matching these prefixes
-LANG_PREFIXES = ("SPAWN_", "A1_MANSION_PART1O", "A1_MANSION_PART1_BATTLE_")
+LANG_PREFIXES = ("A1_MANSION_PART1O", "A1_MANSION_PART1_BATTLE_")
 LANGS = ["DE", "EN", "ES", "FR", "IT", "RU"]
 
 # {English: {lang: translation}} appended to stock MSGLIST.TXT.
 # The loader sorts the table (binary search in Localize), so appending is fine.
 T = {
  "Challenge Mode":      {"ES":"Modo desafío","DE":"Herausforderung","FR":"Mode défi","IT":"Modalità sfida","RU":"Режим испытаний"},
- "Horde - 15 Enemies":  {"ES":"Horda - 15 enemigos","DE":"Horde - 15 Gegner","FR":"Horde - 15 ennemis","IT":"Orda - 15 nemici","RU":"Орда - 15 врагов"},
- "Horde - 25 Enemies":  {"ES":"Horda - 25 enemigos","DE":"Horde - 25 Gegner","FR":"Horde - 25 ennemis","IT":"Orda - 25 nemici","RU":"Орда - 25 врагов"},
- "Horde - 50 Enemies":  {"ES":"Horda - 50 enemigos","DE":"Horde - 50 Gegner","FR":"Horde - 50 ennemis","IT":"Orda - 50 nemici","RU":"Орда - 50 врагов"},
- "Horde - 100 Enemies": {"ES":"Horda - 100 enemigos","DE":"Horde - 100 Gegner","FR":"Horde - 100 ennemis","IT":"Orda - 100 nemici","RU":"Орда - 100 врагов"},
- "Mansion Battle - 15 Enemies":{"ES":"Batalla de la mansión - 15 enemigos","DE":"Villen-Kampf - 15 Gegner","FR":"Bataille du manoir - 15 ennemis","IT":"Battaglia nella villa - 15 nemici","RU":"Битва в особняке - 15 врагов"},
- "Mansion Battle - 25 Enemies":{"ES":"Batalla de la mansión - 25 enemigos","DE":"Villen-Kampf - 25 Gegner","FR":"Bataille du manoir - 25 ennemis","IT":"Battaglia nella villa - 25 nemici","RU":"Битва в особняке - 25 врагов"},
- "Mansion Battle - 50 Enemies":{"ES":"Batalla de la mansión - 50 enemigos","DE":"Villen-Kampf - 50 Gegner","FR":"Bataille du manoir - 50 ennemis","IT":"Battaglia nella villa - 50 nemici","RU":"Битва в особняке - 50 врагов"},
- "Mansion Battle - 100 Enemies":{"ES":"Batalla de la mansión - 100 enemigos","DE":"Villen-Kampf - 100 Gegner","FR":"Bataille du manoir - 100 ennemis","IT":"Battaglia nella villa - 100 nemici","RU":"Битва в особняке - 100 врагов"},
- "Horde - 250 Enemies": {"ES":"Horda - 250 enemigos","DE":"Horde - 250 Gegner","FR":"Horde - 250 ennemis","IT":"Orda - 250 nemici","RU":"Орда - 250 врагов"},
  "Back to Main Menu":   {"ES":"Volver al menú principal","DE":"Zurück zum Hauptmenü","FR":"Retour au menu principal","IT":"Torna al menu principale","RU":"Назад в главное меню"},
  "Best Time":           {"ES":"Mejor tiempo","DE":"Bestzeit","FR":"Meilleur temps","IT":"Miglior tempo","RU":"Лучшее время"},
  "Time":                {"ES":"Tiempo","DE":"Zeit","FR":"Temps","IT":"Tempo","RU":"Время"},
@@ -121,6 +105,17 @@ T = {
  "Custom":              {"ES":"Personalizado","DE":"Benutzerdefiniert","FR":"Personnalisé","IT":"Personalizzato","RU":"Пользовательский"},
  "Kills":               {"ES":"Bajas","DE":"Abschüsse","FR":"Victimes","IT":"Uccisioni","RU":"Убийств"},
  "Challenge Completed": {"ES":"Desafío completado","DE":"Herausforderung gemeistert","FR":"Défi terminé","IT":"Sfida completata","RU":"Испытание пройдено"},
+ "Arena":               {"ES":"Arena","DE":"Arena","FR":"Arène","IT":"Arena","RU":"Арена"},
+ "Enemies":             {"ES":"Enemigos","DE":"Gegner","FR":"Ennemis","IT":"Nemici","RU":"Враги"},
+ "Start Challenge":     {"ES":"Empezar desafío","DE":"Herausforderung starten","FR":"Lancer le défi","IT":"Avvia sfida","RU":"Начать испытание"},
+ "Meatpacking":        {"ES":"Dist. de empaquetado de carne","DE":"Schlachthofbezirk","FR":"Empaquetage des viandes","IT":"Meatpacking District","RU":"Мясной завод"},
+ "Mansion - Roof":      {"ES":"Mansión - Tejado","DE":"Villa - Dach","FR":"Manoir : Toit","IT":"Palazzo - Tetto","RU":"Особняк - Крыша"},
+ "Mansion - Ballroom":  {"ES":"Mansión - Sala de baile","DE":"Villa - Ballsaal","FR":"Manoir : Salle de bal","IT":"Palazzo - Sala da ballo","RU":"Особняк - Бальный зал"},
+ "Union Station - Abandoned Shopping Plaza": {"ES":"Union Station - Centro comercial abandonado","DE":"Union Station - Verlassenes Einkaufszentrum","FR":"Gare : Galerie marchande abandonnée","IT":"Union Station - Centro commerciale abbandonato","RU":"Вокзал - Заброшенный торговый центр"},
+ "Kagan's Tower - Skybridge": {"ES":"Torre de Kagan - Puente aéreo","DE":"Kagans Turm - Brücke","FR":"Tour de Kagan : Pont aérien","IT":"Torre di Kagan - Lucernario","RU":"Башня Кейгана - Мост над бездной"},
+ "Wetworks - Chemical Processing": {"ES":"Wetworks - Procesador químico","DE":"Wetworks - Chemische Verarbeitung","FR":"Centre de traitement des eaux : Station d'épuration","IT":"Wetworks - Impianto chimico","RU":"Ветворкс - Химзавод"},
+ "Boss":                {"ES":"Jefe","DE":"Boss","FR":"Boss","IT":"Boss","RU":"Босс"},
+ "Mansion Battle":      {"ES":"Batalla de la mansión","DE":"Villen-Kampf","FR":"Bataille du manoir","IT":"Battaglia nella villa","RU":"Битва в особняке"},
  # --- opciones globales ---
  "Skin":                {"ES":"Apariencia","DE":"Aussehen","FR":"Apparence","IT":"Aspetto","RU":"Облик"},
  "Default":             {"ES":"Por defecto","DE":"Standard","FR":"Par défaut","IT":"Predefinito","RU":"По умолчанию"},
@@ -234,10 +229,6 @@ def main():
                             emit(lang + "/" + f,
                                  open(os.path.join(d, f), "rb").read(),
                                  "copy-lang")
-        # spawn_250 reuses the extreme arena's ost_* texts verbatim
-        t = load(lang + "/SPAWN_EXTREME.TXT", "lang-derive")
-        if t is not None:
-            emit(lang + "/SPAWN_250.TXT", t, "lang-derive")
         if lang == "EN":
             continue  # English is the key language: no EN msglist exists
         m = load(lang + "/MSGLIST.TXT", "msglist")
