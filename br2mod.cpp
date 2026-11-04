@@ -227,12 +227,6 @@ static char g_hudBuf[64];
 static char g_hudShown[64];
 static char g_killsLbl[40];
 static char g_doneLbl[48];
-// Memory-only counters for read-only diagnostics; no per-frame log/file I/O.
-static volatile unsigned g_hudRenderTicks;
-static volatile unsigned g_hudWrites;
-static volatile unsigned g_objectiveReads;
-static volatile int g_objectiveSpawned, g_objectiveAlive, g_objectiveTarget;
-static volatile DWORD g_objectiveTrigger;
 
 static void TrackHudLevel() {
     const char* lvl = (const char*)0x5E33258;
@@ -250,7 +244,6 @@ static void TrackHudLevel() {
 // and the normal timer update. Blank banners cannot overwrite us later in
 // the same frame. The script interpreter and the level loader stay native.
 static void __cdecl HudTick() {
-    ++g_hudRenderTicks;
     TrackHudLevel();
     const char* lvl = (const char*)0x5E33258;
     if (!IsStandaloneChallengeLevel(lvl)) return;
@@ -258,15 +251,8 @@ static void __cdecl HudTick() {
     DWORD gso = *(DWORD*)0x7C07F8;
     if (!gso) return;
     ObjectiveProgress progress;
-    ++g_objectiveReads;
-    if (!ReadObjectiveProgress(&progress)) {
-        g_objectiveTrigger = 0;
+    if (!ReadObjectiveProgress(&progress))
         return; // no authoritative wave yet: do not display an estimate
-    }
-    g_objectiveTrigger = progress.trigger;
-    g_objectiveSpawned = progress.spawned;
-    g_objectiveAlive = progress.alive;
-    g_objectiveTarget = progress.target;
     g_killCount = progress.spawned - progress.alive;
     if (g_killCount<0) g_killCount = 0;
     // The wave objective is authoritative: all emitted kills accounted for and
@@ -320,7 +306,6 @@ static void __cdecl HudTick() {
         call eax
     }
     strcpy(g_hudShown, text);
-    ++g_hudWrites;
 }
 // CALL detour at 0x4F83A9: preserves the caller's ECX/game-state and CPU state,
 // then tail-enters the original renderer with its original return address.
