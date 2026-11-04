@@ -48,10 +48,11 @@ COPY = []
 for n in ARENAS + BATTLES + EXTRA + HUBS:
     COPY += [n + ".LVL", n + ".SCB"]
 
-# deployed name -> (source name, [(old bytes, new bytes)])
+# deployed name -> list of acceptable source names (first found wins; the
+# deployed name itself keeps regeneration idempotent on a live world\)
 RENAME = {
-    "menu_level.lvl": ("MENU.LVL", []),
-    "menu_level.scb": ("MENU.SCB", []),
+    "menu_level.lvl": ["MENU.LVL", "menu_level.lvl"],
+    "menu_level.scb": ["MENU.SCB", "menu_level.scb"],
 }
 
 DERIVE = {  # output base -> (source base, old, new)
@@ -111,6 +112,9 @@ T = {
  "Custom":              {"ES":"Personalizado","DE":"Benutzerdefiniert","FR":"Personnalisé","IT":"Personalizzato","RU":"Пользовательский"},
  "Kills":               {"ES":"Bajas","DE":"Abschüsse","FR":"Victimes","IT":"Uccisioni","RU":"Убийств"},
  "Challenge Completed": {"ES":"Desafío completado","DE":"Herausforderung gemeistert","FR":"Défi terminé","IT":"Sfida completata","RU":"Испытание пройдено"},
+ # --- opciones globales ---
+ "Skin":                {"ES":"Apariencia","DE":"Aussehen","FR":"Apparence","IT":"Aspetto","RU":"Облик"},
+ "Default":             {"ES":"Por defecto","DE":"Standard","FR":"Par défaut","IT":"Predefinito","RU":"По умолчанию"},
 }
 ENC = {"ES":"cp1252","DE":"cp1252","FR":"cp1252","IT":"cp1252","RU":"cp1251"}
 
@@ -186,11 +190,13 @@ def main():
             d = d.replace(b"\r\n", b"\n")
         emit(name, d, "copy")
 
-    # menu_level <- MENU.*
-    for out, (src, _) in RENAME.items():
-        d = load(src, "rename")
-        if d is None: continue
-        emit(out, d, "rename %s -> %s" % (src, out))
+    # menu_level <- MENU.* (or the deployed name when src == dst)
+    for out, srcs in RENAME.items():
+        for src in srcs:
+            d = load(src, "rename")
+            if d is not None:
+                emit(out, d, "rename %s -> %s" % (src, out))
+                break
 
     # derived tiers (rename inside, then SCB blanks + LVL patches)
     for outbase, (srcbase, old, new) in DERIVE.items():

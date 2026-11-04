@@ -76,6 +76,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_DIFFICULTY     0x111
 #define AC_BACK           0x11C
 #define AC_CHAL_BASE      0x112    // 0x112.. challenge launches
+#define AC_SKIN           0x11D
 #define AC_EXTRA_BASE     0x120    // 0x120.. extra launches
 
 // ----------------------------- data ---------------------------------------
@@ -125,6 +126,93 @@ static void ApplyPreset() {
     g_dmgOut = PRESETS[g_diff].dmgOut;
     g_cost   = PRESETS[g_diff].cost;
 }
+
+// ------------------------- skin override -----------------------------------
+// The game keeps the outfit id in the player-state object at +0x3CC (ids
+// 1..10; native Outfits menu actions push exactly those). Every asset lookup
+// (model, guns, blades, jug, harpoon) resolves it through GetOutfitIndex
+// (0x4F6930), which is only called INSIDE the path getters. So the winning
+// move needs no outfit-function hooks at all (Gunsucked already owns most of
+// that pipeline): we call-detour the 7 `call GetOutfitIndex` sites so the
+// player's +0x3CC holds our id right before any lookup reads it, and keep it
+// written per-frame. Our ids are stock (<=10) so Gunsucked's own hooks pass
+// them straight through. "Default" writes nothing -- native and Gunsucked
+// outfit selection keep working untouched.
+typedef char* (__stdcall *OutfitName_t)(int id);
+static OutfitName_t GetInternalNameN = (OutfitName_t)0x4F6AD0;
+static OutfitName_t GetDisplayNameN  = (OutfitName_t)0x4F6B10;
+typedef unsigned int (__cdecl *GetOutfitIndex_t)(void);
+#define OUTFIT_INDEX_FN 0x4F6930
+
+static int  g_skinOrder[16];                 // [0]=0(Default) then dress,rayne,rest
+static int  g_skinCount = 0;
+static int  g_skinIdx = 0;                   // selected index into g_skinOrder
+static int  g_skinId = 0;                    // resolved outfit id (0=default)
+static int  g_nativeOutfit = -1;             // last game-written +0x3CC (-1=none)
+static int  g_lastWrote = -1;                // our last +0x3CC write (-1=none)
+static char g_skinIni[40] = "default";
+static volatile LONG g_skinDirty = 0;
+
+static void EnsureSkinOrder() {
+    if (g_skinCount) return;
+    int ids[16], n = 0, dress = 0, rayne = 0, k = 0, i;
+    __try {
+        for (int id = 1; id <= 10; ++id) {
+            const char* nm = GetInternalNameN(id);
+            if (!nm || !nm[0]) continue;
+            ids[n++] = id;
+            if (!strcmp(nm, "rayne_dress")) dress = id;
+            else if (!strcmp(nm, "rayne")) rayne = id;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!n) return;                    // table not populated yet; retry later
+    g_skinOrder[k++] = 0;
+    if (dress) g_skinOrder[k++] = dress;
+    if (rayne) g_skinOrder[k++] = rayne;
+    for (i = 0; i < n; ++i)
+        if (ids[i] != dress && ids[i] != rayne) g_skinOrder[k++] = ids[i];
+    g_skinCount = k;
+    if (_stricmp(g_skinIni, "default")) {
+        __try {
+            for (i = 1; i < k; ++i) {
+                const char* nm = GetInternalNameN(g_skinOrder[i]);
+                if (nm && !_stricmp(nm, g_skinIni)) { g_skinIdx = i; break; }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    g_skinId = g_skinOrder[g_skinIdx];
+}
+
+// +0x3CC is the live outfit field (the engine polls it and hot-swaps models),
+// so a preset must be WRITTEN there to apply. We track what the game itself
+// last put there (anything but our own writes) so "Default" can restore the
+// real native pick once and then stay a pure no-op.
+static void ApplySkinForce() {
+    DWORD gs;
+    EnsureSkinOrder();
+    gs = *(DWORD*)G_GAME_STATE;
+    if (!gs) return;
+    if (g_skinId) {
+        int cur = *(int*)(gs + 0x3CC);
+        if (cur != g_lastWrote) g_nativeOutfit = cur;   // fresh game-side pick
+        g_lastWrote = g_skinId;
+        *(int*)(gs + 0x3CC) = g_skinId;
+    } else if (g_lastWrote >= 0) {
+        *(int*)(gs + 0x3CC) = g_nativeOutfit >= 0 ? g_nativeOutfit : 0;
+        g_lastWrote = g_nativeOutfit = -1;
+    }
+}
+
+// Call-site detour target: keep +0x3CC forced moments before the index read.
+static unsigned int __cdecl ForceOutfitIndex() {
+    ApplySkinForce();
+    return ((GetOutfitIndex_t)OUTFIT_INDEX_FN)();
+}
+// `call GetOutfitIndex` sites inside the path getters (Dfm/Gun/Jug/Blade/
+// Harpoon/InternalName/DisplayName-current variants).
+static const DWORD OUTFIT_INDEX_CALLS[] = {
+    0x4F69A0,0x4F69B0,0x4F69C0,0x4F69D0,0x4F6A20,0x4F6A70,0x4F6AC0
+};
 
 struct Entry { const char* title; const char* lvl; };
 static const Entry CHALLENGE[] = {
@@ -246,8 +334,10 @@ static void TrackHudLevel() {
 static void __cdecl HudTick() {
     TrackHudLevel();
     const char* lvl = (const char*)0x5E33258;
+    int menuOpen = *(DWORD*)0x5EF4BF8 != 0;   // any menu open -> not in gameplay
+    if (!menuOpen) ApplySkinForce();
     if (!IsStandaloneChallengeLevel(lvl)) return;
-    if (*(DWORD*)0x5EF4BF8 != 0) return;      // any menu open -> not in gameplay
+    if (menuOpen) return;
     DWORD gso = *(DWORD*)0x7C07F8;
     if (!gso) return;
     ObjectiveProgress progress;
@@ -405,6 +495,22 @@ static void __cdecl OnMenuBuilt() {
                             ? "Dhampir" : Localize(PRESETS[g_diff].name);
         sprintf(buf, "%s: %s", Localize("Difficulty"), pname);
         AddMenuItem(buf, AC_DIFFICULTY, 0);
+        EnsureSkinOrder();
+        {
+            static char sbuf[96];
+            // Native display names are English-only strings, but msglist
+            // carries translations keyed by them ("Cowgirl Rayne" -> ...).
+            const char* sname;
+            if (g_skinId) {
+                const char* raw = GetDisplayNameN(g_skinId);
+                const char* loc = raw ? Localize(raw) : 0;
+                sname = loc ? loc : raw;
+            } else {
+                sname = Localize("Default");
+            }
+            sprintf(sbuf, "%s: %s", Localize("Skin"), sname ? sname : "?");
+            AddMenuItem(sbuf, AC_SKIN, 0);
+        }
         break;
     }
     case MENU_CHALLENGE:
@@ -440,6 +546,21 @@ static int __cdecl DispatchOurs(int action) {
         InterlockedExchange(&g_presetDirty, 1);
         DWORD gs = *(DWORD*)G_GAME_STATE;
         if (gs) *(int*)(gs + 0x1e8) = g_diff + 1;
+        *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
+    if (action == AC_SKIN) {
+        EnsureSkinOrder();
+        if (g_skinCount > 1) {
+            const char* nm;
+            g_skinIdx = (g_skinIdx + 1) % g_skinCount;
+            g_skinId = g_skinOrder[g_skinIdx];
+            nm = g_skinId ? GetInternalNameN(g_skinId) : "default";
+            strncpy(g_skinIni, nm, sizeof g_skinIni - 1);
+            g_skinIni[sizeof g_skinIni - 1] = 0;
+            InterlockedExchange(&g_skinDirty, 1);
+            ApplySkinForce();       // field write -> engine hot-swaps the model
+        }
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
@@ -479,6 +600,7 @@ static void __cdecl ArmChain() {
     *(float*)0x6030490 = 0.0f;      // +0x88 ammo float
     *(float*)0x6030494 = 1.0f;      // +0x8c persistent float
     *(DWORD*)0x603051C = g_diff + 1; // +0x114 difficulty (1-4)
+    ApplySkinForce();               // keep the forced id through chain loads
     *(char*)0x5E335BD = 1;          // chain-pending flag (pump clears it)
     g_pendingChain[0] = 0;
 }
@@ -1004,6 +1126,8 @@ static void LoadConfig() {
                              buf, sizeof buf, ".\\br2mod.ini");
     for (int i = 0; i < NUM_PRESETS; ++i)
         if (!_stricmp(buf, PRESETS[i].name)) g_diff = i;
+    GetPrivateProfileStringA("Appearance", "skin", "default",
+                             g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
 }
 
 static DWORD WINAPI Worker(LPVOID) {
@@ -1037,6 +1161,16 @@ static DWORD WINAPI Worker(LPVOID) {
     for (unsigned i = 0; i < sizeof(HIT_FSTP_EAX)/sizeof(HIT_FSTP_EAX[0]); ++i)
         PatchCallChecked(HIT_FSTP_EAX[i], "\xD9\x98\xC8\x39\x00\x00", 6, HookHitEax);
     PatchCallChecked(RAGE_DMG_SITE, "\xD8\xAE\x60\x83\x00\x00", 6, HookDmgRage);
+    // Outfit override: retarget the `call GetOutfitIndex` inside every path
+    // getter so +0x3CC holds our id right before the lookup. Each site is a
+    // 5-byte E8 rel32 to 0x4F6930; Gunsucked's own function hooks (if any)
+    // sit downstream and pass stock ids straight through.
+    for (unsigned i = 0; i < sizeof(OUTFIT_INDEX_CALLS)/sizeof(OUTFIT_INDEX_CALLS[0]); ++i) {
+        DWORD site = OUTFIT_INDEX_CALLS[i];
+        char exp[5]; exp[0] = (char)0xE8;
+        *(DWORD*)(exp + 1) = OUTFIT_INDEX_FN - (site + 5);
+        PatchCallChecked(site, exp, 5, ForceOutfitIndex);
+    }
     // These were diagnostic workarounds for the wrong-this corruption now
     // fixed in HookA. VirtualQuery on every stricmp dominated character load.
     // Leave the native CRT/cache lookup and native chain path intact by default.
@@ -1053,9 +1187,18 @@ static DWORD WINAPI Worker(LPVOID) {
     // Lazy INI writer: keeps all br2mod.ini disk I/O off the game thread.
     for (;;) {
         Sleep(500);
-        if (InterlockedExchange(&g_presetDirty, 0))
+        // WritePrivateProfileStringA leaves stale NUL padding when the new
+        // value is shorter than the old one: delete the key first.
+        if (InterlockedExchange(&g_presetDirty, 0)) {
+            WritePrivateProfileStringA("Difficulty", "preset", NULL, ".\\br2mod.ini");
             WritePrivateProfileStringA("Difficulty", "preset",
                                        PRESETS[g_diff].name, ".\\br2mod.ini");
+        }
+        if (InterlockedExchange(&g_skinDirty, 0)) {
+            WritePrivateProfileStringA("Appearance", "skin", NULL, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Appearance", "skin",
+                                       g_skinIni, ".\\br2mod.ini");
+        }
     }
 }
 
