@@ -42,11 +42,28 @@
 #define G_HANDLER_ARRAY 0x5DCC0A0  // [0]=POD 0x5A3FD0 [1]=loose 0x4937B0
 #define G_PLAYER_OBJ    0x61276EC  // [ptr] Rayne object (from gunsucked rayne2.CT)
 
-// shared "modify stat" helper: computes new value via 0x556EE0 then
-//   0x55219C  fstp [esi+0x39C8]   health store (all characters!)
-//   0x5521C0  fstp [esi+0x8360]   rage store
-#define SITE_HEALTH 0x55219C
-#define SITE_RAGE   0x5521C0
+// Real damage writes: `fsubr [esi+0x39C8]` = health - st0(dmg), inlined per
+// actor class (19 sites) + 1 rage site `fsubr [esi+0x8360]`. Patched with a
+// CALL (5B) so one shared handler serves all sites — the call pushes the
+// per-site return for us. Scaling: fmul st0 by dmgIn(player)/dmgOut(other).
+static const DWORD HEALTH_DMG_SITES[] = {
+    0x480DB1,0x4AC401,0x4B2938,0x4B2977,0x4BDEF8,0x4BDF37,0x527238,
+    0x52D7D4,0x53B721,0x544B14,0x5515B4,0x58D5B4,0x58D5F3,0x5BD694,
+    0x5BD6D7,0x610394,0x63C6A8,0x63C6E7,0x66DE08
+};
+#define RAGE_DMG_SITE 0x5515A4
+// Per-class TakeDamage path: `fld [reg+0x39C8]; fsub <dmg>; fstp [reg+0x39C8]`
+// (the fstp is often followed by the post-damage update call 0x4030A0). The
+// victim register differs per class — one handler per register.
+static const DWORD HIT_FSTP_ESI[] = {
+    0x43778C,0x43B36D,0x44C68E,0x44F6CC,0x47A25D,0x4A9B70,0x4B29EA,
+    0x4BDFAA,0x525240,0x533355,0x547B4D,0x5515DF,0x55219C,0x552ABC,
+    0x58D65C,0x5C61D8,0x63C75A,0x640354,0x6530FD
+};
+static const DWORD HIT_FSTP_EDI[] = {
+    0x417577,0x478806,0x47EEEF,0x4B843D,0x4C3A90,0x4EE2EB,0x539668,0x614DE6
+};
+static const DWORD HIT_FSTP_EAX[] = { 0x55C3A5 };
 static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 
 #define MENU_MAIN      0x01
@@ -74,6 +91,21 @@ static int g_diff = 1;
 static char g_pendingChain[64];
 static int g_legacyGuards = 0;
 static int g_chainTrace = 0;
+static int g_diffTrace = 0;
+static DWORD g_hObj;
+static float g_hOld;
+static FILE* g_dlog;
+static const char g_healthtag[] = "HEALTH";
+static const char g_ragetag[]   = "RAGE  ";
+static void __cdecl LogDmgHit(const char* kind) {
+    if (!g_dlog) { if (fopen_s(&g_dlog, "br2mod_diff.log", "a") || !g_dlog) return; }
+    DWORD pl = *(DWORD*)G_PLAYER_OBJ;
+    fprintf(g_dlog, "%s obj=%08X %s old=%.1f rawDmg=%.1f mult=%.2f -> %.1f\n",
+            kind, g_hObj, g_hObj == pl ? "PLAYER" : "other ",
+            (double)g_hOld, (double)g_new, (double)g_mult,
+            (double)(g_hOld - g_new * g_mult));
+    fflush(g_dlog);
+}
 static void ApplyPreset() {
     g_dmgIn  = PRESETS[g_diff].dmgIn;
     g_dmgOut = PRESETS[g_diff].dmgOut;
@@ -378,55 +410,177 @@ static void __declspec(naked) HookB() {
 }
 
 // ------------------------- difficulty hooks --------------------------------
-// @0x55219C: st0 = new health for character esi. If new<old => damage:
-//   esi==player -> *dmgIn | else -> *dmgOut. new' = old - dmg*mult.
-// Heals (new>=old) pass through unscaled.
-static void __declspec(naked) HookHealth() {
+// Entered via `call` patches at each `fsubr [esi+0x39C8]` site: st0 = raw
+// damage, esi = victim object. Scale st0, log optionally, replay the stolen
+// instruction, ret -> the site+5 nop -> the original fstp stores the result.
+static void __declspec(naked) HookDmgHealth() {
     __asm {
-        mov  eax, [esi + 0x39C8]
-        fst  dword ptr [g_new]          // keep st0 = new
-        cmp  eax, dword ptr [g_new]
-        jbe  orig                        // heal/equal -> no scale
+        fst  dword ptr [g_new]           // raw damage for the log
         mov  eax, [g_dmgOut]
         cmp  esi, dword ptr ds:[G_PLAYER_OBJ]
         jne  use
         mov  eax, [g_dmgIn]
     use:
         mov  [g_mult], eax
-        fld  dword ptr [esi + 0x39C8]    // old
-        fsub dword ptr [g_new]           // dmg = old-new
-        fmul dword ptr [g_mult]
-        fsubr dword ptr [esi + 0x39C8]   // st0 = old - dmg*mult
-        fxch st(1)                        // st0=new, st1=scaled
-        fstp st(0)                        // drop new -> st0=scaled
-    orig:
-        fstp dword ptr [esi + 0x39C8]
-        push 0x5521A2
+        fmul dword ptr [g_mult]          // st0 = dmg * mult
+        cmp  dword ptr [g_diffTrace], 0
+        je   apply
+        mov  eax, [esi + 0x39C8]
+        mov  [g_hOld], eax
+        mov  [g_hObj], esi
+    }
+    BR2_SAVE_CPU
+    __asm {
+        push offset g_healthtag
+        call LogDmgHit
+        add  esp, 4
+    }
+    BR2_RESTORE_CPU
+    __asm {
+    apply:
+        fsubr dword ptr [esi + 0x39C8]   // stolen: health - scaled dmg
         ret
     }
 }
 
-// @0x5521C0: st0 = new rage for character esi. Player decreases only
-// (costs) get *cost; gains/enemies unscaled.
-static void __declspec(naked) HookRage() {
+// TakeDamage tail: entered via `call` at `fstp [reg+0x39C8]` — st0 = the
+// already-computed new health. old>new means real damage: rescale the
+// difference by dmgIn/dmgOut, then replay the fstp ourselves.
+static void __declspec(naked) HookHitEsi() {
     __asm {
-        mov  eax, [esi + 0x8360]
+        mov  eax, [esi + 0x39C8]
         fst  dword ptr [g_new]
-        cmp  esi, dword ptr ds:[G_PLAYER_OBJ]
-        jne  orig                        // enemies: unscaled
         cmp  eax, dword ptr [g_new]
-        jbe  orig                        // rage gain -> no scale
-        mov  eax, [g_cost]
-        mov  [g_mult], eax
-        fld  dword ptr [esi + 0x8360]
+        jbe  done                            // heal/equal -> store raw
+        mov  [g_hObj], esi
+        mov  [g_hOld], eax
+        mov  ecx, [g_dmgOut]
+        cmp  esi, dword ptr ds:[G_PLAYER_OBJ]
+        jne  scaled
+        mov  ecx, [g_dmgIn]
+    scaled:
+        mov  [g_mult], ecx
+        fld  dword ptr [esi + 0x39C8]
+        fsub dword ptr [g_new]               // st0 = dmg
+        fmul dword ptr [g_mult]
+        fsubr dword ptr [esi + 0x39C8]       // st0 = old - dmg*mult
+        fxch st(1)
+        fstp st(0)                           // st0 = scaled new
+        cmp  dword ptr [g_diffTrace], 0
+        je   done
+    }
+    BR2_SAVE_CPU
+    __asm {
+        push offset g_healthtag
+        call LogDmgHit
+        add  esp, 4
+    }
+    BR2_RESTORE_CPU
+    __asm {
+    done:
+        fstp dword ptr [esi + 0x39C8]
+        ret
+    }
+}
+
+static void __declspec(naked) HookHitEdi() {
+    __asm {
+        mov  eax, [edi + 0x39C8]
+        fst  dword ptr [g_new]
+        cmp  eax, dword ptr [g_new]
+        jbe  done
+        mov  [g_hObj], edi
+        mov  [g_hOld], eax
+        mov  ecx, [g_dmgOut]
+        cmp  edi, dword ptr ds:[G_PLAYER_OBJ]
+        jne  scaled
+        mov  ecx, [g_dmgIn]
+    scaled:
+        mov  [g_mult], ecx
+        fld  dword ptr [edi + 0x39C8]
         fsub dword ptr [g_new]
         fmul dword ptr [g_mult]
-        fsubr dword ptr [esi + 0x8360]
+        fsubr dword ptr [edi + 0x39C8]
         fxch st(1)
         fstp st(0)
-    orig:
-        fstp dword ptr [esi + 0x8360]
-        push 0x5521C6
+        cmp  dword ptr [g_diffTrace], 0
+        je   done
+    }
+    BR2_SAVE_CPU
+    __asm {
+        push offset g_healthtag
+        call LogDmgHit
+        add  esp, 4
+    }
+    BR2_RESTORE_CPU
+    __asm {
+    done:
+        fstp dword ptr [edi + 0x39C8]
+        ret
+    }
+}
+
+// eax is the victim itself — use ecx/edx as scratch.
+static void __declspec(naked) HookHitEax() {
+    __asm {
+        mov  ecx, [eax + 0x39C8]
+        fst  dword ptr [g_new]
+        cmp  ecx, dword ptr [g_new]
+        jbe  done
+        mov  [g_hObj], eax
+        mov  [g_hOld], ecx
+        mov  edx, [g_dmgOut]
+        cmp  eax, dword ptr ds:[G_PLAYER_OBJ]
+        jne  scaled
+        mov  edx, [g_dmgIn]
+    scaled:
+        mov  [g_mult], edx
+        fld  dword ptr [eax + 0x39C8]
+        fsub dword ptr [g_new]
+        fmul dword ptr [g_mult]
+        fsubr dword ptr [eax + 0x39C8]
+        fxch st(1)
+        fstp st(0)
+        cmp  dword ptr [g_diffTrace], 0
+        je   done
+    }
+    BR2_SAVE_CPU
+    __asm {
+        push offset g_healthtag
+        call LogDmgHit
+        add  esp, 4
+    }
+    BR2_RESTORE_CPU
+    __asm {
+    done:
+        fstp dword ptr [eax + 0x39C8]
+        ret
+    }
+}
+
+// Same for `fsubr [esi+0x8360]`: st0 = rage cost, only the player pays it.
+static void __declspec(naked) HookDmgRage() {
+    __asm {
+        fst  dword ptr [g_new]
+        mov  eax, [g_cost]
+        mov  [g_mult], eax
+        fmul dword ptr [g_mult]
+        cmp  dword ptr [g_diffTrace], 0
+        je   apply
+        mov  eax, [esi + 0x8360]
+        mov  [g_hOld], eax
+        mov  [g_hObj], esi
+    }
+    BR2_SAVE_CPU
+    __asm {
+        push offset g_ragetag
+        call LogDmgHit
+        add  esp, 4
+    }
+    BR2_RESTORE_CPU
+    __asm {
+    apply:
+        fsubr dword ptr [esi + 0x8360]   // stolen: rage - scaled cost
         ret
     }
 }
@@ -556,6 +710,25 @@ static void PatchChecked(DWORD site,const char* expected,int length,void* target
     PatchSite((void*)site,length,target);
 }
 
+// `call rel32` detour: pushes the site return so ONE handler can serve many
+// sites sharing the same stolen instruction. Handler must replay it and ret.
+static void PatchCallChecked(DWORD site,const char* expected,int length,void* target) {
+    if (memcmp((void*)site,expected,length)) {
+        Trace("PATCH SKIPPED signature mismatch address=%08lX",site); return;
+    }
+    DWORD old;
+    if (!VirtualProtect((void*)site,length,PAGE_EXECUTE_READWRITE,&old)) {
+        Trace("PATCH failed address=%08lX error=%lu",site,GetLastError()); return;
+    }
+    BYTE* p=(BYTE*)site;
+    p[0]=0xE8;
+    *(DWORD*)(p+1)=(DWORD)target-(site+5);
+    for (int i=5;i<length;++i) p[i]=0x90;
+    VirtualProtect((void*)site,length,old,&old);
+    FlushInstructionCache(GetCurrentProcess(),(void*)site,length);
+    Trace("PATCH-CALL address=%08lX length=%d target=%08lX",site,length,(DWORD)target);
+}
+
 // loose-file priority: wait until both handlers are installed.
 // Swap ONLY if still POD-first — if Gunsucked already made it
 // loose-first we leave it alone (coexistence).
@@ -639,6 +812,7 @@ HRESULT WINAPI DirectInput8Create(
 static void LoadConfig() {
     g_legacyGuards = GetPrivateProfileIntA("Diagnostics","LegacyGuards",0,".\\br2mod.ini");
     g_chainTrace = GetPrivateProfileIntA("Diagnostics","ChainTrace",0,".\\br2mod.ini");
+    g_diffTrace = GetPrivateProfileIntA("Diagnostics","DifficultyTrace",0,".\\br2mod.ini");
     char buf[64];
     GetPrivateProfileStringA("Difficulty", "preset", "Dhampir",
                              buf, sizeof buf, ".\\br2mod.ini");
@@ -665,8 +839,15 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchSite((void*)0x5670E1, 12, HookB);
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     ApplyPreset();
-    PatchSite((void*)SITE_HEALTH, 6, HookHealth);
-    PatchSite((void*)SITE_RAGE,   6, HookRage);
+    for (unsigned i = 0; i < sizeof(HEALTH_DMG_SITES)/sizeof(HEALTH_DMG_SITES[0]); ++i)
+        PatchCallChecked(HEALTH_DMG_SITES[i], "\xD8\xAE\xC8\x39\x00\x00", 6, HookDmgHealth);
+    for (unsigned i = 0; i < sizeof(HIT_FSTP_ESI)/sizeof(HIT_FSTP_ESI[0]); ++i)
+        PatchCallChecked(HIT_FSTP_ESI[i], "\xD9\x9E\xC8\x39\x00\x00", 6, HookHitEsi);
+    for (unsigned i = 0; i < sizeof(HIT_FSTP_EDI)/sizeof(HIT_FSTP_EDI[0]); ++i)
+        PatchCallChecked(HIT_FSTP_EDI[i], "\xD9\x9F\xC8\x39\x00\x00", 6, HookHitEdi);
+    for (unsigned i = 0; i < sizeof(HIT_FSTP_EAX)/sizeof(HIT_FSTP_EAX[0]); ++i)
+        PatchCallChecked(HIT_FSTP_EAX[i], "\xD9\x98\xC8\x39\x00\x00", 6, HookHitEax);
+    PatchCallChecked(RAGE_DMG_SITE, "\xD8\xAE\x60\x83\x00\x00", 6, HookDmgRage);
     // These were diagnostic workarounds for the wrong-this corruption now
     // fixed in HookA. VirtualQuery on every stricmp dominated character load.
     // Leave the native CRT/cache lookup and native chain path intact by default.
