@@ -311,6 +311,56 @@ static int __cdecl SuppressStandaloneSavePrompt() {
 // ------------------------- kill counter -------------------------------------
 typedef const char* (__cdecl *Localize_t)(const char*);
 static Localize_t Localize = (Localize_t)FN_LOCALIZE;
+
+// Fallback localization for the mod's own keys. The game's msglist is loaded
+// once at boot; on some first launches our appended keys are absent or the
+// table resolves in English, so our texts leak English while stock Spanish
+// is fine. When Localize misses (returns the key itself or NULL) we serve
+// our own strings indexed by the active language id at 0x7BF14C.
+// Column order: EN, FR, IT, ES, DE, JA(unused->0), RU
+typedef struct { const char* key; const char* t[7]; } ModLoc;
+static const ModLoc MODL[] = {
+ {"Challenge Mode", {"Challenge Mode","Mode d\xE9""fi","Modalit\xE0 sfida","Modo desaf\xEDo","Herausforderung",0,"\xD0\xE5\xE6\xE8\xEC \xE8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE9"}},
+ {"Horde - 15 Enemies", {"Horde - 15 Enemies","Horde - 15 ennemis","Orda - 15 nemici","Horda - 15 enemigos","Horde - 15 Gegner",0,"\xCE\xF0\xE4\xE0 - 15 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Horde - 25 Enemies", {"Horde - 25 Enemies","Horde - 25 ennemis","Orda - 25 nemici","Horda - 25 enemigos","Horde - 25 Gegner",0,"\xCE\xF0\xE4\xE0 - 25 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Horde - 50 Enemies", {"Horde - 50 Enemies","Horde - 50 ennemis","Orda - 50 nemici","Horda - 50 enemigos","Horde - 50 Gegner",0,"\xCE\xF0\xE4\xE0 - 50 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Horde - 100 Enemies", {"Horde - 100 Enemies","Horde - 100 ennemis","Orda - 100 nemici","Horda - 100 enemigos","Horde - 100 Gegner",0,"\xCE\xF0\xE4\xE0 - 100 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Mansion Battle - 15 Enemies", {"Mansion Battle - 15 Enemies","Bataille du manoir - 15 ennemis","Battaglia nella villa - 15 nemici","Batalla de la mansi\xF3n - 15 enemigos","Villen-Kampf - 15 Gegner",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5 - 15 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Mansion Battle - 25 Enemies", {"Mansion Battle - 25 Enemies","Bataille du manoir - 25 ennemis","Battaglia nella villa - 25 nemici","Batalla de la mansi\xF3n - 25 enemigos","Villen-Kampf - 25 Gegner",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5 - 25 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Mansion Battle - 50 Enemies", {"Mansion Battle - 50 Enemies","Bataille du manoir - 50 ennemis","Battaglia nella villa - 50 nemici","Batalla de la mansi\xF3n - 50 enemigos","Villen-Kampf - 50 Gegner",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5 - 50 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Mansion Battle - 100 Enemies", {"Mansion Battle - 100 Enemies","Bataille du manoir - 100 ennemis","Battaglia nella villa - 100 nemici","Batalla de la mansi\xF3n - 100 enemigos","Villen-Kampf - 100 Gegner",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5 - 100 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Horde - 250 Enemies", {"Horde - 250 Enemies","Horde - 250 ennemis","Orda - 250 nemici","Horda - 250 enemigos","Horde - 250 Gegner",0,"\xCE\xF0\xE4\xE0 - 250 \xE2\xF0\xE0\xE3\xEE\xE2"}},
+ {"Back to Main Menu", {"Back to Main Menu","Retour au menu principal","Torna al menu principale","Volver al men\xFA principal","Zur\xFC""ck zum Hauptmen\xFC",0,"\xCD\xE0\xE7\xE0\xE4 \xE2 \xE3\xEB\xE0\xE2\xED\xEE\xE5 \xEC\xE5\xED\xFE"}},
+ {"Best Time", {"Best Time","Meilleur temps","Miglior tempo","Mejor tiempo","Bestzeit",0,"\xCB\xF3\xF7\xF8\xE5\xE5 \xE2\xF0\xE5\xEC\xFF"}},
+ {"Time", {"Time","Temps","Tempo","Tiempo","Zeit",0,"\xC2\xF0\xE5\xEC\xFF"}},
+ {"New Record!", {"New Record!","Nouveau record !","Nuovo record!","\xA1Nuevo r\xE9""cord!","Neuer Rekord!",0,"\xCD\xEE\xE2\xFB\xE9 \xF0\xE5\xEA\xEE\xF0\xE4!"}},
+ {"Story Mode", {"Story Mode","Mode histoire","Modalit\xE0 storia","Modo historia","Story-Modus",0,"\xD1\xFE\xE6\xE5\xF2\xED\xFB\xE9 \xF0\xE5\xE6\xE8\xEC"}},
+ {"Combat Mode", {"Combat Mode","Mode combat","Modalit\xE0 combattimento","Modo combate","Kampfmodus",0,"\xC1\xEE\xE5\xE2\xEE\xE9 \xF0\xE5\xE6\xE8\xEC"}},
+ {"Character Museum", {"Character Museum","Mus\xE9""e des personnages","Museo dei personaggi","Museo de personajes","Charakter-Museum",0,"\xCC\xF3\xE7\xE5\xE9 \xEF\xE5\xF0\xF1\xEE\xED\xE0\xE6\xE5\xE9"}},
+ {"Suicide Run", {"Suicide Run","Course suicide","Corsa suicida","Carrera suicida","Selbstmord-Lauf",0,"\xD1\xE0\xEC\xEE\xF3\xE1\xE8\xE9\xF1\xF2\xE2\xE5\xED\xED\xFB\xE9 \xE7\xE0\xE1\xE5\xE3"}},
+ {"Testing Level", {"Testing Level","Niveau de test","Livello di test","Nivel de pruebas","Test-Level",0,"\xD2\xE5\xF1\xF2\xEE\xE2\xFB\xE9 \xF3\xF0\xEE\xE2\xE5\xED\xFC"}},
+ {"Difficulty", {"Difficulty","Difficult\xE9","Difficolt\xE0","Dificultad","Schwierigkeit",0,"\xD1\xEB\xEE\xE6\xED\xEE\xF1\xF2\xFC"}},
+ {"Unraveller", {"Unraveller","Le Corrupteur","Unraveller","Desmembrador","Filetierer",0,"\xC2\xEE\xED\xFE\xEA"}},
+ {"Custom", {"Custom","Personnalis\xE9","Personalizzato","Personalizado","Benutzerdefiniert",0,"\xCF\xEE\xEB\xFC\xE7\xEE\xE2\xE0\xF2\xE5\xEB\xFC\xF1\xEA\xE8\xE9"}},
+ {"Kills", {"Kills","Victimes","Uccisioni","Bajas","Absch\xFCsse",0,"\xD3\xE1\xE8\xE9\xF1\xF2\xE2"}},
+ {"Challenge Completed", {"Challenge Completed","D\xE9""fi termin\xE9","Sfida completata","Desaf\xEDo completado","Herausforderung gemeistert",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5 \xEF\xF0\xEE\xE9\xE4\xE5\xED\xEE"}},
+ {"Skin", {"Skin","Apparence","Aspetto","Apariencia","Aussehen",0,"\xCE\xE1\xEB\xE8\xEA"}},
+ {"Default", {"Default","Par d\xE9""faut","Predefinito","Por defecto","Standard",0,"\xCF\xEE \xF3\xEC\xEE\xEB\xF7\xE0\xED\xE8\xFE"}},
+};
+static const char* ModLocalize(const char* key) {
+    const char* r = Localize(key);
+    if (r && strcmp(r, key)) return r;          // table resolved -> use it
+    int i, lang;
+    __try { lang = *(int*)0x7BF14C; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { lang = 0; }
+    for (i = 0; i < (int)(sizeof MODL / sizeof MODL[0]); ++i)
+        if (!strcmp(MODL[i].key, key)) {
+            const char* s = (lang >= 1 && lang <= 7) ? MODL[i].t[lang - 1] : 0;
+            if (!s) s = MODL[i].t[0];           // JA/unknown -> English
+            return s;
+        }
+    return r ? r : key;
+}
 static int  g_killCount;
 static char g_hudLvl[64];
 static char g_hudBuf[64];
@@ -633,16 +683,16 @@ static void __cdecl HudTick() {
     // Localize only once, while we are known to be in live gameplay -- calling
     // it mid level-load can walk a string table that is being rebuilt.
     if (!g_killsLbl[0]) {
-        const char* label = Localize("Kills");
+        const char* label = ModLocalize("Kills");
         strncpy(g_killsLbl, label ? label : "Kills", sizeof g_killsLbl - 1);
         g_killsLbl[sizeof g_killsLbl - 1] = 0;
-        const char* msg = Localize("Challenge Completed");
+        const char* msg = ModLocalize("Challenge Completed");
         strncpy(g_doneLbl, msg ? msg : "Challenge Completed", sizeof g_doneLbl - 1);
         g_doneLbl[sizeof g_doneLbl - 1] = 0;
-        const char* tl = Localize("Time");
+        const char* tl = ModLocalize("Time");
         strncpy(g_timeLbl, tl ? tl : "Time", sizeof g_timeLbl - 1);
         g_timeLbl[sizeof g_timeLbl - 1] = 0;
-        const char* rl = Localize("New Record!");
+        const char* rl = ModLocalize("New Record!");
         strncpy(g_recLbl, rl ? rl : "New Record!", sizeof g_recLbl - 1);
         g_recLbl[sizeof g_recLbl - 1] = 0;
     }
@@ -736,7 +786,7 @@ static void __cdecl OnMenuBuilt() {
     unsigned i;
     switch (id) {
     case MENU_MAIN: {
-        AddMenuItem(Localize("Challenge Mode"), AC_CHALLENGE_MENU, 0);
+        AddMenuItem(ModLocalize("Challenge Mode"), AC_CHALLENGE_MENU, 0);
         // mover nuestro item ANTES de "Extras": items [NG,Load,Opt,Ext,Quit,CH]
         // -> shift [n-3..n-2] (Extras,Quit) una posicion abajo, CH a n-3
         {
@@ -753,15 +803,15 @@ static void __cdecl OnMenuBuilt() {
     }
     case MENU_EXTRAS:
         for (i = 0; i < sizeof(EXTRA)/sizeof(EXTRA[0]); ++i)
-            AddMenuItem(Localize(EXTRA[i].title), AC_EXTRA_BASE + i, EXTRA[i].lvl);
+            AddMenuItem(ModLocalize(EXTRA[i].title), AC_EXTRA_BASE + i, EXTRA[i].lvl);
         break;
     case MENU_OPTIONS: {
         static char buf[64];
         // "Dhampir" is a proper name: show it verbatim in every language
         // (the native ES string is "Dhampir:" which would read wrong here).
         const char* pname = !_stricmp(PRESETS[g_diff].name, "Dhampir")
-                            ? "Dhampir" : Localize(PRESETS[g_diff].name);
-        sprintf(buf, "%s: %s", Localize("Difficulty"), pname);
+                            ? "Dhampir" : ModLocalize(PRESETS[g_diff].name);
+        sprintf(buf, "%s: %s", ModLocalize("Difficulty"), pname);
         AddMenuItem(buf, AC_DIFFICULTY, 0);
         EnsureSkinOrder();
         {
@@ -774,9 +824,9 @@ static void __cdecl OnMenuBuilt() {
                 const char* loc = raw ? Localize(raw) : 0;
                 sname = loc ? loc : raw;
             } else {
-                sname = Localize("Default");
+                sname = ModLocalize("Default");
             }
-            sprintf(sbuf, "%s: %s", Localize("Skin"), sname ? sname : "?");
+            sprintf(sbuf, "%s: %s", ModLocalize("Skin"), sname ? sname : "?");
             AddMenuItem(sbuf, AC_SKIN, 0);
         }
         break;
@@ -792,7 +842,7 @@ static void __cdecl OnMenuBuilt() {
 // Fill rows only from its epilogue; CallMenu owns selection/stack changes.
 static void BuildChallengeMenu() {
     int i;
-    const char* btl = Localize("Best Time");
+    const char* btl = ModLocalize("Best Time");
     if (!btl) btl = "Best Time";
     *(int*)G_ITEM_COUNT = 0;
     for (i = 0; i < (int)NUM_CHALLENGES; ++i) {
@@ -804,11 +854,11 @@ static void BuildChallengeMenu() {
                           (best / 1000u) % 60u, (best / 10u) % 100u);
         else strcpy(tb, "--");
         _snprintf(lbl, sizeof lbl - 1, "%s - %s: %s",
-                  Localize(CHALLENGE[i].title), btl, tb);
+                  ModLocalize(CHALLENGE[i].title), btl, tb);
         lbl[sizeof lbl - 1] = 0;
         AddMenuItem(lbl, AC_CHAL_BASE + i, CHALLENGE[i].lvl);
     }
-    AddMenuItem(Localize("Back to Main Menu"), AC_BACK, 0);
+    AddMenuItem(ModLocalize("Back to Main Menu"), AC_BACK, 0);
 }
 
 // ------------------------- action dispatch ---------------------------------
