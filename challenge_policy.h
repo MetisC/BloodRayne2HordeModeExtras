@@ -16,3 +16,14 @@ static bool IsStandaloneChallengeLevel(const char* name) {
         if (!_stricmp(basename,hubs[i])) return true;
     return false;
 }
+
+// A challenge can already have chained here when the automatic save routine
+// runs. This name alone is not enough to suppress a campaign save prompt;
+// the caller must also retain the challenge-session context.
+static bool IsChallengeMenuBridge(const char* name) {
+    if (!name) return false;
+    const char* base = name;
+    for (const char* p=name; *p; ++p)
+        if (*p=='\\' || *p=='/') base=p+1;
+    return !_stricmp(base,"menu_level.lvl");
+}

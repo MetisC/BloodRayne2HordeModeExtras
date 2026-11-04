@@ -6,3 +6,4 @@ br2mod.lib
 br2mod.exp
 *.pdb
 *.log
+validation.txt

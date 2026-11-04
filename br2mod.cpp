@@ -90,6 +90,7 @@ static const Preset PRESETS[] = {
 #define NUM_PRESETS 5
 #define DIFF_CUSTOM  4
 static int g_diff = 1;
+static volatile LONG g_presetDirty = 0;
 static char g_pendingChain[64];
 static int g_legacyGuards = 0;
 static int g_chainTrace = 0;
@@ -147,6 +148,7 @@ static const Entry EXTRA[] = {
 
 #include "br2diag.h"
 #include "challenge_policy.h"
+#include "objective_progress.h"
 
 static void __cdecl RestoreMenuFont() {
     // The title font is shared by gameplay messages, loading screens and UI.
@@ -177,8 +179,139 @@ static void __declspec(naked) HookMenuBegin() {
     }
 }
 
+static bool g_challengeSession;
+static int __cdecl FinishStandaloneSession() {
+    if (!g_challengeSession) return 0;
+    const char* current = (const char*)0x5E33258;
+    if (!IsChallengeMenuBridge(current) &&
+        !(IsStandaloneChallengeLevel(current) && IsChallengeMenuBridge((const char*)0x6030408))) return 0;
+    // Same "stop gameplay" result as the accepted pause-menu exit in
+    // 0x4F7969. Let the outer native loop unload and rebuild the real menu.
+    *(char*)0x6030408 = 0;
+    *(char*)0x5E335BD = 0;
+    g_challengeSession = false;
+    return 1;
+}
+static void __declspec(naked) HookChallengeExit() {
+    BR2_SAVE_CPU
+    __asm { call FinishStandaloneSession }
+    __asm { mov [esp+556],eax }
+    BR2_RESTORE_CPU
+    __asm {
+        test eax,eax
+        jz normal
+        xor eax,eax
+        ret
+    normal:
+        push 0x4F7810
+        ret
+    }
+}
 static int __cdecl SuppressStandaloneSavePrompt() {
-    return IsStandaloneChallengeLevel((const char*)0x5E33258) ? 1 : 0;
+    const char* level = (const char*)0x5E33258;
+    if (IsStandaloneChallengeLevel(level)) {
+        g_challengeSession = true;
+        return 1;
+    }
+    if (IsChallengeMenuBridge(level)) return g_challengeSession ? 1 : 0;
+    g_challengeSession = false; // campaign/Extras always keep the native prompt
+    return 0;
+}
+
+// ------------------------- kill counter -------------------------------------
+typedef const char* (__cdecl *Localize_t)(const char*);
+static Localize_t Localize = (Localize_t)FN_LOCALIZE;
+static int  g_killCount;
+static char g_hudLvl[64];
+static char g_hudBuf[64];
+static char g_hudShown[64];
+static char g_killsLbl[40];
+// Memory-only counters for read-only diagnostics; no per-frame log/file I/O.
+static volatile unsigned g_hudRenderTicks;
+static volatile unsigned g_hudWrites;
+static volatile unsigned g_objectiveReads;
+static volatile int g_objectiveSpawned, g_objectiveAlive, g_objectiveTarget;
+static volatile DWORD g_objectiveTrigger;
+
+static void TrackHudLevel() {
+    const char* lvl = (const char*)0x5E33258;
+    if (strncmp(lvl, g_hudLvl, sizeof g_hudLvl)) {
+        strncpy(g_hudLvl, lvl, sizeof g_hudLvl - 1);
+        g_hudLvl[sizeof g_hudLvl - 1] = 0;
+        g_killCount = 0;
+        g_hudShown[0] = 0;
+        if (IsStandaloneChallengeLevel(lvl)) g_challengeSession = true;
+        else if (!IsChallengeMenuBridge(lvl)) g_challengeSession = false;
+    }
+}
+
+// Called immediately BEFORE the native onscreen-text renderer, after scripts
+// and the normal timer update. Blank banners cannot overwrite us later in
+// the same frame. The script interpreter and the level loader stay native.
+static void __cdecl HudTick() {
+    ++g_hudRenderTicks;
+    TrackHudLevel();
+    const char* lvl = (const char*)0x5E33258;
+    if (!IsStandaloneChallengeLevel(lvl)) return;
+    if (*(DWORD*)0x5EF4BF8 != 0) return;      // any menu open -> not in gameplay
+    DWORD gso = *(DWORD*)0x7C07F8;
+    if (!gso) return;
+    ObjectiveProgress progress;
+    ++g_objectiveReads;
+    if (!ReadObjectiveProgress(&progress)) {
+        g_objectiveTrigger = 0;
+        return; // no authoritative wave yet: do not display an estimate
+    }
+    g_objectiveTrigger = progress.trigger;
+    g_objectiveSpawned = progress.spawned;
+    g_objectiveAlive = progress.alive;
+    g_objectiveTarget = progress.target;
+    g_killCount = progress.spawned - progress.alive;
+    if (g_killCount<0) g_killCount = 0;
+    // Yield the slot to script text (e.g. "Challenge Completed"): if the slot
+    // holds something we did not write and it is still alive, leave it be.
+    // All-space strings are our masked-out banners -> treated as empty.
+    const char* slot = (const char*)(gso + 0x3F0);
+    float     dur  = *(float*)(gso + 0x4F0);
+    if (dur < 0.0f || dur > 60.0f) return;    // slot sanity (transitions)
+    if (slot[0] && dur > 0.0f && strcmp(slot, g_hudShown)) {
+        const char* p = slot;
+        while (*p == ' ') ++p;
+        if (*p) return;                     // real foreign text -> yield
+    }
+    // Localize only once, while we are known to be in live gameplay -- calling
+    // it mid level-load can walk a string table that is being rebuilt.
+    if (!g_killsLbl[0]) {
+        const char* label = Localize("Kills");
+        strncpy(g_killsLbl, label ? label : "Kills", sizeof g_killsLbl - 1);
+        g_killsLbl[sizeof g_killsLbl - 1] = 0;
+    }
+    sprintf(g_hudBuf, "%s: %d", g_killsLbl, g_killCount);
+    __asm {
+        mov  ecx, gso
+        push 0
+        push 0
+        push 0
+        push 0x3F800000                      // f2 = 1.0f
+        push 0xBF800000                      // duration = -1.0f (auto)
+        push offset g_hudBuf
+        mov  eax, 0x4F4560                   // native onscreen-text setter
+        call eax
+    }
+    strcpy(g_hudShown, g_hudBuf);
+    ++g_hudWrites;
+}
+// CALL detour at 0x4F83A9: preserves the caller's ECX/game-state and CPU state,
+// then tail-enters the original renderer with its original return address.
+// Never patch 0x4F93B0..BB: the loader jumps BACK to 0x4F93B5 internally.
+static void __declspec(naked) HookHudRender() {
+    BR2_SAVE_CPU
+    __asm { call HudTick }
+    BR2_RESTORE_CPU
+    __asm {
+        push 0x4F71C0
+        ret
+    }
 }
 
 // 0x566430 is only the automatic "Save Game?" prompt. The native routine
@@ -203,10 +336,8 @@ static void __declspec(naked) HookSavePrompt() {
 }
 
 // ------------------------- game call helpers -------------------------------
-typedef const char* (__cdecl *Localize_t)(const char*);
 typedef void (__cdecl *CallMenu_t)(int);
 typedef void (__cdecl *MenuBack_t)(void);
-static Localize_t Localize = (Localize_t)FN_LOCALIZE;
 static CallMenu_t CallMenu = (CallMenu_t)FN_CALL_MENU;
 static MenuBack_t MenuBack = (MenuBack_t)FN_MENU_BACK;
 
@@ -256,8 +387,11 @@ static void __cdecl OnMenuBuilt() {
         break;
     case MENU_OPTIONS: {
         static char buf[64];
-        sprintf(buf, "%s: %s", Localize("Difficulty"),
-                PRESETS[g_diff].name);
+        // "Dhampir" is a proper name: show it verbatim in every language
+        // (the native ES string is "Dhampir:" which would read wrong here).
+        const char* pname = !_stricmp(PRESETS[g_diff].name, "Dhampir")
+                            ? "Dhampir" : Localize(PRESETS[g_diff].name);
+        sprintf(buf, "%s: %s", Localize("Difficulty"), pname);
         AddMenuItem(buf, AC_DIFFICULTY, 0);
         break;
     }
@@ -288,8 +422,10 @@ static int __cdecl DispatchOurs(int action) {
     if (action == AC_DIFFICULTY) {
         g_diff = (g_diff + 1) % NUM_PRESETS;
         ApplyPreset();
-        WritePrivateProfileStringA("Difficulty", "preset",
-                                   PRESETS[g_diff].name, ".\\br2mod.ini");
+        // Persist lazily: WritePrivateProfileStringA rewrites the whole INI on
+        // the game thread -- its first (cold-cache, AV-scanned) write hitched
+        // the menu. The Worker's writer loop flushes it off-thread instead.
+        InterlockedExchange(&g_presetDirty, 1);
         DWORD gs = *(DWORD*)G_GAME_STATE;
         if (gs) *(int*)(gs + 0x1e8) = g_diff + 1;
         *(unsigned char*)G_MENU_REBUILD = 1;
@@ -303,6 +439,11 @@ static int __cdecl DispatchOurs(int action) {
     if (!e && i >= 0 && i < (int)(sizeof(EXTRA)/sizeof(EXTRA[0])))
         e = &EXTRA[i];
     if (!e) return -1;
+    g_challengeSession = IsStandaloneChallengeLevel(e->lvl);
+    // Starting the same challenge again must also reset its session counter.
+    g_hudLvl[0] = 0;
+    g_hudShown[0] = 0;
+    g_killCount = 0;
     // 0x5EF4948 is the picked-level buffer: the state machine (0x569990)
     // stricmp()s it against the chapter name [0x7C2280] and then passes it
     // straight to 0x4F9570 on BOTH branches. 0x706B84 turned out to be a
@@ -428,6 +569,8 @@ static void __declspec(naked) HookB() {
 // instruction, ret -> the site+5 nop -> the original fstp stores the result.
 static void __declspec(naked) HookDmgHealth() {
     __asm {
+        pushfd
+        pushad
         fst  dword ptr [g_new]           // raw damage for the log
         mov  eax, [g_dmgOut]
         cmp  esi, dword ptr ds:[G_PLAYER_OBJ]
@@ -452,8 +595,10 @@ static void __declspec(naked) HookDmgHealth() {
     __asm {
     apply:
         fsubr dword ptr [esi + 0x39C8]   // stolen: health - scaled dmg
-        ret
     }
+    __asm { popad }
+    __asm { popfd }
+    __asm { ret }
 }
 
 // TakeDamage tail: entered via `call` at `fstp [reg+0x39C8]` — st0 = the
@@ -461,6 +606,8 @@ static void __declspec(naked) HookDmgHealth() {
 // difference by dmgIn/dmgOut, then replay the fstp ourselves.
 static void __declspec(naked) HookHitEsi() {
     __asm {
+        pushfd
+        pushad
         mov  eax, [esi + 0x39C8]
         fst  dword ptr [g_new]
         cmp  eax, dword ptr [g_new]
@@ -492,12 +639,16 @@ static void __declspec(naked) HookHitEsi() {
     __asm {
     done:
         fstp dword ptr [esi + 0x39C8]
-        ret
     }
+    __asm { popad }
+    __asm { popfd }
+    __asm { ret }
 }
 
 static void __declspec(naked) HookHitEdi() {
     __asm {
+        pushfd
+        pushad
         mov  eax, [edi + 0x39C8]
         fst  dword ptr [g_new]
         cmp  eax, dword ptr [g_new]
@@ -529,13 +680,17 @@ static void __declspec(naked) HookHitEdi() {
     __asm {
     done:
         fstp dword ptr [edi + 0x39C8]
-        ret
     }
+    __asm { popad }
+    __asm { popfd }
+    __asm { ret }
 }
 
 // eax is the victim itself — use ecx/edx as scratch.
 static void __declspec(naked) HookHitEax() {
     __asm {
+        pushfd
+        pushad
         mov  ecx, [eax + 0x39C8]
         fst  dword ptr [g_new]
         cmp  ecx, dword ptr [g_new]
@@ -567,13 +722,17 @@ static void __declspec(naked) HookHitEax() {
     __asm {
     done:
         fstp dword ptr [eax + 0x39C8]
-        ret
     }
+    __asm { popad }
+    __asm { popfd }
+    __asm { ret }
 }
 
 // Same for `fsubr [esi+0x8360]`: st0 = rage cost, only the player pays it.
 static void __declspec(naked) HookDmgRage() {
     __asm {
+        pushfd
+        pushad
         fst  dword ptr [g_new]
         mov  eax, [g_cost]
         mov  [g_mult], eax
@@ -594,6 +753,8 @@ static void __declspec(naked) HookDmgRage() {
     __asm {
     apply:
         fsubr dword ptr [esi + 0x8360]   // stolen: rage - scaled cost
+        popad
+        popfd
         ret
     }
 }
@@ -851,6 +1012,8 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchSite((void*)0x561E1A, 6, HookA);
     PatchSite((void*)0x5670E1, 12, HookB);
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
+    PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
+    PatchCallChecked(0x4F9137,"\xE8\xD4\xE6\xFF\xFF",5,HookChallengeExit);
     ApplyPreset();
     for (unsigned i = 0; i < sizeof(HEALTH_DMG_SITES)/sizeof(HEALTH_DMG_SITES[0]); ++i)
         PatchCallChecked(HEALTH_DMG_SITES[i], "\xD8\xAE\xC8\x39\x00\x00", 6, HookDmgHealth);
@@ -874,7 +1037,13 @@ static DWORD WINAPI Worker(LPVOID) {
     }
     TraceGlobals("hooks-installed");
     ArmGlassWatch();
-    return 0;
+    // Lazy INI writer: keeps all br2mod.ini disk I/O off the game thread.
+    for (;;) {
+        Sleep(500);
+        if (InterlockedExchange(&g_presetDirty, 0))
+            WritePrivateProfileStringA("Difficulty", "preset",
+                                       PRESETS[g_diff].name, ".\\br2mod.ini");
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
