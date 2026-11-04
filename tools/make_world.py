@@ -37,8 +37,7 @@ import argparse
 
 # ---------------------------------------------------------------- manifest
 
-ARENAS = ["SPAWN_EASY", "SPAWN_NORMAL", "SPAWN_HARD", "SPAWN_EXTREME",
-          "SPAWN_INFINITE"]
+ARENAS = ["SPAWN_EASY", "SPAWN_NORMAL", "SPAWN_HARD", "SPAWN_EXTREME"]
 BATTLES = ["A1_MANSION_PART1_BATTLE_EASY", "A1_MANSION_PART1_BATTLE_NORMAL",
            "A1_MANSION_PART1_BATTLE_HARD", "A1_MANSION_PART1_BATTLE_EXTREME"]
 EXTRA = ["A1_MANSION_PART1O", "A1_MANSION_PART1_STORYMODE12"]
@@ -60,6 +59,9 @@ DERIVE = {  # output base -> (source base, old, new)
                                      b"NORMAL", b"NORM"),
     "A1_MANSION_PART1_BATTLE_EXTR": ("A1_MANSION_PART1_BATTLE_EXTREME",
                                      b"EXTREME", b"EXTR"),
+    # The 250-kill tier is the usermod's own extreme configuration (its
+    # LVL already says maxNumberSpawn=250) with the internal refs renamed.
+    "SPAWN_250": ("SPAWN_EXTREME", b"spawn_extreme", b"spawn_250"),
 }
 
 # SCB equal-length replacements (script strings must keep their declared
@@ -79,10 +81,14 @@ LVL_PATCH = {
         [(b"\t99    // maxNumberSpawn", b"\t100    // maxNumberSpawn")],
     "SPAWN_EXTREME.LVL":
         [(b"\t250    // maxNumberSpawn", b"\t100    // maxNumberSpawn")],
+    # spawn_250 keeps the usermod's ORIGINAL 250 cap: when --src is an
+    # already-deployed world\ (patched to 100) this restores it.
+    "SPAWN_250.LVL":
+        [(b"\t100    // maxNumberSpawn", b"\t250    // maxNumberSpawn")],
 }
 
 # files the mod pipeline rewrote in text mode (CRLF collapsed to LF)
-LINEFEED = {"SPAWN_EXTREME.LVL"}
+LINEFEED = {"SPAWN_EXTREME.LVL", "SPAWN_250.LVL"}
 
 # language dirs: copy every usermod .TXT matching these prefixes
 LANG_PREFIXES = ("SPAWN_", "A1_MANSION_PART1O", "A1_MANSION_PART1_BATTLE_")
@@ -100,8 +106,11 @@ T = {
  "Mansion Battle - 25 Enemies":{"ES":"Batalla de la mansión - 25 enemigos","DE":"Villen-Kampf - 25 Gegner","FR":"Bataille du manoir - 25 ennemis","IT":"Battaglia nella villa - 25 nemici","RU":"Битва в особняке - 25 врагов"},
  "Mansion Battle - 50 Enemies":{"ES":"Batalla de la mansión - 50 enemigos","DE":"Villen-Kampf - 50 Gegner","FR":"Bataille du manoir - 50 ennemis","IT":"Battaglia nella villa - 50 nemici","RU":"Битва в особняке - 50 врагов"},
  "Mansion Battle - 100 Enemies":{"ES":"Batalla de la mansión - 100 enemigos","DE":"Villen-Kampf - 100 Gegner","FR":"Bataille du manoir - 100 ennemis","IT":"Battaglia nella villa - 100 nemici","RU":"Битва в особняке - 100 врагов"},
- "Survival - Infinite": {"ES":"Supervivencia - Infinita","DE":"Überleben - Unendlich","FR":"Survie - Infinie","IT":"Sopravvivenza - Infinita","RU":"Выживание - Бесконечное"},
+ "Horde - 250 Enemies": {"ES":"Horda - 250 enemigos","DE":"Horde - 250 Gegner","FR":"Horde - 250 ennemis","IT":"Orda - 250 nemici","RU":"Орда - 250 врагов"},
  "Back to Main Menu":   {"ES":"Volver al menú principal","DE":"Zurück zum Hauptmenü","FR":"Retour au menu principal","IT":"Torna al menu principale","RU":"Назад в главное меню"},
+ "Best Time":           {"ES":"Mejor tiempo","DE":"Bestzeit","FR":"Meilleur temps","IT":"Miglior tempo","RU":"Лучшее время"},
+ "Time":                {"ES":"Tiempo","DE":"Zeit","FR":"Temps","IT":"Tempo","RU":"Время"},
+ "New Record!":         {"ES":"¡Nuevo récord!","DE":"Neuer Rekord!","FR":"Nouveau record !","IT":"Nuovo record!","RU":"Новый рекорд!"},
  "Story Mode":          {"ES":"Modo historia","DE":"Story-Modus","FR":"Mode histoire","IT":"Modalità storia","RU":"Сюжетный режим"},
  "Combat Mode":         {"ES":"Modo combate","DE":"Kampfmodus","FR":"Mode combat","IT":"Modalità combattimento","RU":"Боевой режим"},
  "Character Museum":    {"ES":"Museo de personajes","DE":"Charakter-Museum","FR":"Musée des personnages","IT":"Museo dei personaggi","RU":"Музей персонажей"},
@@ -225,6 +234,10 @@ def main():
                             emit(lang + "/" + f,
                                  open(os.path.join(d, f), "rb").read(),
                                  "copy-lang")
+        # spawn_250 reuses the extreme arena's ost_* texts verbatim
+        t = load(lang + "/SPAWN_EXTREME.TXT", "lang-derive")
+        if t is not None:
+            emit(lang + "/SPAWN_250.TXT", t, "lang-derive")
         if lang == "EN":
             continue  # English is the key language: no EN msglist exists
         m = load(lang + "/MSGLIST.TXT", "msglist")

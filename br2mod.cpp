@@ -25,6 +25,7 @@
 #include <Windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 // ----------------------------- addresses ----------------------------------
 #define FN_LOCALIZE      0x5898A0  // localize(english)->localized
@@ -224,8 +225,9 @@ static const Entry CHALLENGE[] = {
     { "Mansion Battle - 25 Enemies", "hub2.lvl" },
     { "Mansion Battle - 50 Enemies", "hub3.lvl" },
     { "Mansion Battle - 100 Enemies", "hub4.lvl" },
-    { "Survival - Infinite",  "spawn_infinite.lvl" },
+    { "Horde - 250 Enemies",  "spawn_250.lvl" },
 };
+#define NUM_CHALLENGES (sizeof(CHALLENGE)/sizeof(CHALLENGE[0]))
 static const Entry EXTRA[] = {
     { "Story Mode",       "hub5.lvl" },
     { "Combat Mode",      "0combat.lvl" },
@@ -312,9 +314,57 @@ static Localize_t Localize = (Localize_t)FN_LOCALIZE;
 static int  g_killCount;
 static char g_hudLvl[64];
 static char g_hudBuf[64];
-static char g_hudShown[64];
+static char g_hudShown[96];
 static char g_killsLbl[40];
 static char g_doneLbl[48];
+static char g_timeLbl[40];
+static char g_recLbl[48];
+static char g_doneBuf[96];
+
+// ---- best times: persisted in .\br2mod_times.ini [Times] <lvlspec>=<ms> ----
+// Unset entries read back as 0 and render "--". The run clock accumulates the
+// engine's OWN scaled world delta at gameState+0x3D8 (slow-mo factor already
+// applied), sampled only while HudTick runs in a challenge (menus excluded).
+static DWORD g_bestTimes[NUM_CHALLENGES];
+static int   g_timeChal = -1;    // CHALLENGE index whose run is being timed
+static float g_runAccum;         // accumulated run seconds (game time)
+static int   g_runArmed;         // first enemy emitted -> clock counts
+static int   g_runDone;          // completion latched -> no more counting
+static int   g_newRecord;        // last completion beat the stored best
+
+#define TIMES_FILE ".\\br2mod_times.ini"
+static void FormatTime(DWORD ms, char* out) {
+    sprintf(out, "%u'%02u'%02u", ms / 60000u,
+            (ms / 1000u) % 60u, (ms / 10u) % 100u);
+}
+static void TimeKey(const char* lvl, char* out) {
+    const char* base = lvl;
+    const char* p;
+    int n = 0;
+    for (p = lvl; *p; ++p)
+        if (*p == '\\' || *p == '/') base = p + 1;
+    for (; base[n] && base[n] != '.' && n < 63; ++n)
+        out[n] = (char)tolower((unsigned char)base[n]);
+    out[n] = 0;
+}
+static void LoadBestTimes() {
+    unsigned i; char key[64];
+    for (i = 0; i < NUM_CHALLENGES; ++i) {
+        TimeKey(CHALLENGE[i].lvl, key);
+        g_bestTimes[i] = GetPrivateProfileIntA("Times", key, 0, TIMES_FILE);
+    }
+}
+static int SaveBestTime(int idx, DWORD ms) {
+    char key[64], val[16];
+    if (idx < 0 || idx >= (int)NUM_CHALLENGES) return 0;
+    if (g_bestTimes[idx] && ms >= g_bestTimes[idx]) return 0;
+    g_bestTimes[idx] = ms;
+    TimeKey(CHALLENGE[idx].lvl, key);
+    sprintf(val, "%u", (unsigned)ms);
+    WritePrivateProfileStringA("Times", key, NULL, TIMES_FILE);
+    WritePrivateProfileStringA("Times", key, val, TIMES_FILE);
+    return 1;
+}
 
 static void TrackHudLevel() {
     const char* lvl = (const char*)0x5E33258;
@@ -335,14 +385,21 @@ static void __cdecl HudTick() {
     TrackHudLevel();
     const char* lvl = (const char*)0x5E33258;
     int menuOpen = *(DWORD*)0x5EF4BF8 != 0;   // any menu open -> not in gameplay
+    DWORD gso = *(DWORD*)0x7C07F8;
+    // Game-time clock: the engine's own scaled world delta (slow-mo factor
+    // already applied by the game; pauses/menus are excluded by the gate).
+    if (g_runArmed && !g_runDone && !menuOpen && gso &&
+        IsStandaloneChallengeLevel(lvl))
+        g_runAccum += *(float*)(gso + 0x3D8);
     if (!menuOpen) ApplySkinForce();
     if (!IsStandaloneChallengeLevel(lvl)) return;
     if (menuOpen) return;
-    DWORD gso = *(DWORD*)0x7C07F8;
     if (!gso) return;
     ObjectiveProgress progress;
     if (!ReadObjectiveProgress(&progress))
         return; // no authoritative wave yet: do not display an estimate
+    if (!g_runArmed && progress.spawned > 0)
+        g_runArmed = 1;              // combat actually begins with first spawn
     g_killCount = progress.spawned - progress.alive;
     if (g_killCount<0) g_killCount = 0;
     // The wave objective is authoritative: all emitted kills accounted for and
@@ -356,6 +413,19 @@ static void __cdecl HudTick() {
                 && progress.alive == 0;
     s_doneStreak = rawDone ? s_doneStreak + 1 : 0;
     bool done = s_doneStreak >= 45;
+    if (done && g_runArmed && !g_runDone) {
+        DWORD ms = (DWORD)(g_runAccum * 1000.0f);
+        char tb[16];
+        g_runDone = 1;
+        g_newRecord = SaveBestTime(g_timeChal, ms);
+        FormatTime(ms, tb);
+        if (g_newRecord)
+            sprintf(g_doneBuf, "%s - %s: %s - %s",
+                    g_doneLbl, g_timeLbl, tb, g_recLbl);
+        else
+            sprintf(g_doneBuf, "%s - %s: %s", g_doneLbl, g_timeLbl, tb);
+    }
+    if (done && !g_runDone) g_doneBuf[0] = 0; // not armed this run
     // Yield the slot to script text: if the slot holds something we did not
     // write and it is still alive, leave it be -- except when done, where our
     // localized message replaces whatever the script displayed.
@@ -377,9 +447,15 @@ static void __cdecl HudTick() {
         const char* msg = Localize("Challenge Completed");
         strncpy(g_doneLbl, msg ? msg : "Challenge Completed", sizeof g_doneLbl - 1);
         g_doneLbl[sizeof g_doneLbl - 1] = 0;
+        const char* tl = Localize("Time");
+        strncpy(g_timeLbl, tl ? tl : "Time", sizeof g_timeLbl - 1);
+        g_timeLbl[sizeof g_timeLbl - 1] = 0;
+        const char* rl = Localize("New Record!");
+        strncpy(g_recLbl, rl ? rl : "New Record!", sizeof g_recLbl - 1);
+        g_recLbl[sizeof g_recLbl - 1] = 0;
     }
     const char* text = g_hudBuf;
-    if (done) text = g_doneLbl;
+    if (done) text = g_doneBuf[0] ? g_doneBuf : g_doneLbl;
     else if (progress.target > 0)
         sprintf(g_hudBuf, "%s: %d/%d", g_killsLbl, g_killCount, progress.target);
     else sprintf(g_hudBuf, "%s: %d", g_killsLbl, g_killCount);
@@ -524,9 +600,22 @@ static void __cdecl OnMenuBuilt() {
 // Fill rows only from its epilogue; CallMenu owns selection/stack changes.
 static void BuildChallengeMenu() {
     int i;
+    const char* btl = Localize("Best Time");
+    if (!btl) btl = "Best Time";
     *(int*)G_ITEM_COUNT = 0;
-    for (i = 0; i < (int)(sizeof(CHALLENGE)/sizeof(CHALLENGE[0])); ++i)
-        AddMenuItem(Localize(CHALLENGE[i].title), AC_CHAL_BASE + i, CHALLENGE[i].lvl);
+    for (i = 0; i < (int)NUM_CHALLENGES; ++i) {
+        // Label buffer inside a menu item is 72 bytes: single-byte locales
+        // make byte-truncation safe, but keep the full text under it anyway.
+        char lbl[72], tb[16];
+        DWORD best = g_bestTimes[i];
+        if (best) sprintf(tb, "%u'%02u'%02u", best / 60000u,
+                          (best / 1000u) % 60u, (best / 10u) % 100u);
+        else strcpy(tb, "--");
+        _snprintf(lbl, sizeof lbl - 1, "%s - %s: %s",
+                  Localize(CHALLENGE[i].title), btl, tb);
+        lbl[sizeof lbl - 1] = 0;
+        AddMenuItem(lbl, AC_CHAL_BASE + i, CHALLENGE[i].lvl);
+    }
     AddMenuItem(Localize("Back to Main Menu"), AC_BACK, 0);
 }
 
@@ -566,8 +655,11 @@ static int __cdecl DispatchOurs(int action) {
     }
     const Entry* e = NULL;
     int i = action - AC_CHAL_BASE;
-    if (i >= 0 && i < (int)(sizeof(CHALLENGE)/sizeof(CHALLENGE[0])))
+    g_timeChal = -1;
+    if (i >= 0 && i < (int)NUM_CHALLENGES) {
         e = &CHALLENGE[i];
+        g_timeChal = i;
+    }
     i = action - AC_EXTRA_BASE;
     if (!e && i >= 0 && i < (int)(sizeof(EXTRA)/sizeof(EXTRA[0])))
         e = &EXTRA[i];
@@ -577,6 +669,9 @@ static int __cdecl DispatchOurs(int action) {
     g_hudLvl[0] = 0;
     g_hudShown[0] = 0;
     g_killCount = 0;
+    g_runArmed = 0;
+    g_runDone = 0;
+    g_runAccum = 0.0f;
     // 0x5EF4948 is the picked-level buffer: the state machine (0x569990)
     // stricmp()s it against the chapter name [0x7C2280] and then passes it
     // straight to 0x4F9570 on BOTH branches. 0x706B84 turned out to be a
@@ -1133,6 +1228,7 @@ static void LoadConfig() {
 static DWORD WINAPI Worker(LPVOID) {
     InitTrace();
     LoadConfig();
+    LoadBestTimes();
     EnableLooseFilePriority();       // polls until handlers installed
     Sleep(500);
     if (g_traceEnabled) {
