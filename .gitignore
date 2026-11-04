@@ -1,0 +1,8 @@
+# Build artifacts
+dinput8.dll
+dinput8.map
+br2mod.obj
+br2mod.lib
+br2mod.exp
+*.pdb
+*.log
