@@ -226,6 +226,7 @@ static char g_hudLvl[64];
 static char g_hudBuf[64];
 static char g_hudShown[64];
 static char g_killsLbl[40];
+static char g_doneLbl[48];
 // Memory-only counters for read-only diagnostics; no per-frame log/file I/O.
 static volatile unsigned g_hudRenderTicks;
 static volatile unsigned g_hudWrites;
@@ -268,13 +269,19 @@ static void __cdecl HudTick() {
     g_objectiveTarget = progress.target;
     g_killCount = progress.spawned - progress.alive;
     if (g_killCount<0) g_killCount = 0;
-    // Yield the slot to script text (e.g. "Challenge Completed"): if the slot
-    // holds something we did not write and it is still alive, leave it be.
+    // The wave objective is authoritative: all emitted kills accounted for and
+    // nobody left alive = done. Then we own the slot and repaint the localized
+    // completion text, overwriting the script's literal English banner.
+    bool done = progress.target > 0 && progress.spawned >= progress.target
+                && progress.alive == 0;
+    // Yield the slot to script text: if the slot holds something we did not
+    // write and it is still alive, leave it be -- except when done, where our
+    // localized message replaces whatever the script displayed.
     // All-space strings are our masked-out banners -> treated as empty.
     const char* slot = (const char*)(gso + 0x3F0);
     float     dur  = *(float*)(gso + 0x4F0);
     if (dur < 0.0f || dur > 60.0f) return;    // slot sanity (transitions)
-    if (slot[0] && dur > 0.0f && strcmp(slot, g_hudShown)) {
+    if (!done && slot[0] && dur > 0.0f && strcmp(slot, g_hudShown)) {
         const char* p = slot;
         while (*p == ' ') ++p;
         if (*p) return;                     // real foreign text -> yield
@@ -285,8 +292,13 @@ static void __cdecl HudTick() {
         const char* label = Localize("Kills");
         strncpy(g_killsLbl, label ? label : "Kills", sizeof g_killsLbl - 1);
         g_killsLbl[sizeof g_killsLbl - 1] = 0;
+        const char* msg = Localize("Challenge Completed");
+        strncpy(g_doneLbl, msg ? msg : "Challenge Completed", sizeof g_doneLbl - 1);
+        g_doneLbl[sizeof g_doneLbl - 1] = 0;
     }
-    sprintf(g_hudBuf, "%s: %d", g_killsLbl, g_killCount);
+    const char* text = g_hudBuf;
+    if (done) text = g_doneLbl;
+    else sprintf(g_hudBuf, "%s: %d", g_killsLbl, g_killCount);
     __asm {
         mov  ecx, gso
         push 0
@@ -294,11 +306,12 @@ static void __cdecl HudTick() {
         push 0
         push 0x3F800000                      // f2 = 1.0f
         push 0xBF800000                      // duration = -1.0f (auto)
-        push offset g_hudBuf
+        mov  eax, text
+        push eax
         mov  eax, 0x4F4560                   // native onscreen-text setter
         call eax
     }
-    strcpy(g_hudShown, g_hudBuf);
+    strcpy(g_hudShown, text);
     ++g_hudWrites;
 }
 // CALL detour at 0x4F83A9: preserves the caller's ECX/game-state and CPU state,
@@ -313,6 +326,12 @@ static void __declspec(naked) HookHudRender() {
         ret
     }
 }
+
+// NOTE: display() passes its argument literally -- the interpreter path
+// 0x4CD88D..0x4CD946 contains no localization lookup at all, so
+// display(Challenge Completed) always renders English. A detour on the
+// setter call proved unstable (AV at 0x639587 inside the setter's
+// whitespace skipper); left native until a safe site is proven.
 
 // 0x566430 is only the automatic "Save Game?" prompt. The native routine
 // checks saved transition health then calls CallMenu(0x0B); it has no other
@@ -1014,6 +1033,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
     PatchCallChecked(0x4F9137,"\xE8\xD4\xE6\xFF\xFF",5,HookChallengeExit);
+    // 0x4CD940 (display setter call) detour removed: unstable, see note above.
     ApplyPreset();
     for (unsigned i = 0; i < sizeof(HEALTH_DMG_SITES)/sizeof(HEALTH_DMG_SITES[0]); ++i)
         PatchCallChecked(HEALTH_DMG_SITES[i], "\xD8\xAE\xC8\x39\x00\x00", 6, HookDmgHealth);

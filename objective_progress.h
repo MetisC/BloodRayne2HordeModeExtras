@@ -10,7 +10,7 @@ static DWORD ActorWord(DWORD object, unsigned offset) {
     return *(DWORD*)(object + offset);
 }
 
-static bool ReadObjectiveProgress(ObjectiveProgress* result) {
+static bool ReadObjectiveProgressImpl(ObjectiveProgress* result) {
     DWORD situation = *(DWORD*)0x7C2478;
     DWORD actors = *(DWORD*)0x7C5D50;
     if (!situation || !actors) return false;
@@ -72,4 +72,14 @@ static bool ReadObjectiveProgress(ObjectiveProgress* result) {
     result->target = (int)ActorWord(goal,0x1B4);
     result->alive = alive;
     return result->spawned>=0;
+}
+
+// The trigger list is walked on every rendered frame, including the loading
+// screen: nodes can already carry the CSpawnTrigger vtable while their name
+// (+0x1BC) and event (+0x220) fields are still unpopulated/garbage. A bad
+// read there used to kill the game inside CRT stricmp (AV at 0x6B3D8D).
+// A fault simply means "no readable objective this frame".
+static bool ReadObjectiveProgress(ObjectiveProgress* result) {
+    __try { return ReadObjectiveProgressImpl(result); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
