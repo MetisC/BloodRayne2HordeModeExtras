@@ -272,8 +272,14 @@ static void __cdecl HudTick() {
     // The wave objective is authoritative: all emitted kills accounted for and
     // nobody left alive = done. Then we own the slot and repaint the localized
     // completion text, overwriting the script's literal English banner.
-    bool done = progress.target > 0 && progress.spawned >= progress.target
+    // Between waves the trigger briefly reports spawned>=target with alive==0
+    // before the next batch is emitted -> "done" flickers for 1-2 frames.
+    // Require a sustained completion (~0.75s) before owning the slot.
+    static int s_doneStreak = 0;
+    bool rawDone = progress.target > 0 && progress.spawned >= progress.target
                 && progress.alive == 0;
+    s_doneStreak = rawDone ? s_doneStreak + 1 : 0;
+    bool done = s_doneStreak >= 45;
     // Yield the slot to script text: if the slot holds something we did not
     // write and it is still alive, leave it be -- except when done, where our
     // localized message replaces whatever the script displayed.
@@ -298,6 +304,8 @@ static void __cdecl HudTick() {
     }
     const char* text = g_hudBuf;
     if (done) text = g_doneLbl;
+    else if (progress.target > 0)
+        sprintf(g_hudBuf, "%s: %d/%d", g_killsLbl, g_killCount, progress.target);
     else sprintf(g_hudBuf, "%s: %d", g_killsLbl, g_killCount);
     __asm {
         mov  ecx, gso
