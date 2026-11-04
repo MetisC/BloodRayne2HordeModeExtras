@@ -83,3 +83,29 @@ static bool ReadObjectiveProgress(ObjectiveProgress* result) {
     __try { return ReadObjectiveProgressImpl(result); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+
+// Diagnostics (opt-in): dump every spawn-trigger candidate and why the
+// goal scan accepts/rejects it. Offsets mirror ReadObjectiveProgressImpl.
+static void DumpObjectiveTriggers(FILE* f) {
+    __try {
+        DWORD situation = *(DWORD*)0x7C2478;
+        if (!situation) { fprintf(f, "no situation\n"); return; }
+        for (DWORD p = ActorWord(situation,0x38C); p; p = ActorWord(p,0x148)) {
+            DWORD vt = ActorWord(p,0);
+            if (vt != 0x71D164) continue;
+            DWORD en = ActorWord(p,0x24);
+            const char* nm = (const char*)p+0x1BC;
+            const char* ev = (const char*)p+0x220;
+            char nbuf[64], ebuf[96];
+            strncpy(nbuf, nm, 63); nbuf[63]=0;
+            strncpy(ebuf, ev, 95); ebuf[95]=0;
+            int emitters = 0;
+            for (unsigned i=0;i<10 && ActorWord(p,0x16C+i*4);++i) ++emitters;
+            fprintf(f, "trig=%08X en=%08X name='%s' ev='%s' emit=%d"
+                       " target=%d spawned=%d\n",
+                    p, en, nbuf, ebuf, emitters,
+                    (int)ActorWord(p,0x1B4), (int)ActorWord(p,0x1B8));
+        }
+        fflush(f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { fprintf(f, "dump fault\n"); fflush(f); }
+}

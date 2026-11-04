@@ -60,6 +60,11 @@ def main():
     lvl, n = re.subn(r"world\\[A-Za-z0-9_]+\.script",
                      lambda m: "world\\%s.script" % a.name, lvl, count=1)
     assert n == 1, "script dep not found in " + lvl_base
+    # the loader picks the .SCB by the level's ROOT NAME -- retarget it or the
+    # stock story script would run instead of our retargeted copy
+    lvl, n = re.subn(r'(// Root name of level\r?\n)[^\r\n]+',
+                     lambda m: m.group(1) + a.name, lvl, count=1)
+    assert n == 1, "root name not found in " + lvl_base
     out_lvl = os.path.join(a.dst, a.name + ".lvl")
     open(out_lvl, "wb").write(lvl.encode("cp1252"))
     print("lvl ->", os.path.basename(out_lvl))

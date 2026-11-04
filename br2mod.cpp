@@ -75,13 +75,12 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 // Action codes >= 0x110: natives stop at 0x10C, zero collisions.
 #define AC_CHALLENGE_MENU 0x110
 #define AC_DIFFICULTY     0x111
-#define AC_ARENA_CYCLE    0x112    // cycle arena selection
 #define AC_COUNT_CYCLE    0x113    // cycle enemy-count selection
-#define AC_CHAL_START     0x114    // launch selected arena+count combo
-#define AC_BOSS_BASE      0x116    // 0x116.. fixed boss-fight launches
+#define AC_GUNS_CYCLE     0x114    // cycle weapons on/off for the run
 #define AC_BACK           0x11C
 #define AC_SKIN           0x11D
 #define AC_EXTRA_BASE     0x120    // 0x120.. extra launches
+#define AC_ARENA_BASE     0x130    // 0x130.. arena launches at selected count
 
 // ----------------------------- data ---------------------------------------
 struct Preset { const char* name; float dmgIn, dmgOut, cost; };
@@ -100,6 +99,8 @@ static char g_pendingChain[64];
 static int g_legacyGuards = 0;
 static int g_chainTrace = 0;
 static int g_diffTrace = 0;
+static int g_trigTrace = 0;
+static FILE* g_trigLog;
 static DWORD g_hObj;
 static float g_hOld;
 static FILE* g_dlog;
@@ -219,63 +220,43 @@ static const DWORD OUTFIT_INDEX_CALLS[] = {
 };
 
 struct Entry { const char* title; const char* lvl; };
-// Challenge arenas: each has a display name plus per-count .lvl variants.
-// A NULL slot means that count is unavailable and is skipped when cycling.
-#define NUM_CNT 4
-static const int COUNTS[NUM_CNT] = { 15, 25, 50, 100 };
-typedef struct { const char* name; const char* lvls[NUM_CNT]; } Arena;
+// Two arenas, five counts, guns on/off. lvls[0]=no guns, lvls[1]=guns.
+// Stock levels (battle_*/spawn_*) load straight from the PODs; chb_* are
+// generated copies (count patches, multigun inject/relocate, retitled
+// scripts) produced by tools/make_modes.py.
+#define NUM_CNT 5
+static const int COUNTS[NUM_CNT] = { 15, 25, 50, 100, 250 };
+typedef struct { const char* name; const char* lvls[2][NUM_CNT]; } Arena;
 static const Arena ARENAS[] = {
-    { "Mansion Battle",
-      { "a1_mansion_part1_battle_easy.lvl",
+    { "Mansion Battle", {{
+        "a1_mansion_part1_battle_easy.lvl",
         "a1_mansion_part1_battle_normal.lvl",
         "a1_mansion_part1_battle_hard.lvl",
-        "a1_mansion_part1_battle_extreme.lvl" } },
-    { "Mansion - Ballroom",
-      { "chb_m5_e.lvl", "chb_m5_n.lvl",
-        "chb_m5_h.lvl", "chb_m5_x.lvl" } },
-    { "Mansion - Roof",
-      { "chb_roof_e.lvl", "chb_roof_n.lvl",
-        "chb_roof_h.lvl", "chb_roof_x.lvl" } },
-    { "Meatpacking",
-      { "chb_mp_e.lvl", "chb_mp_n.lvl",
-        "chb_mp_h.lvl", "chb_mp_x.lvl" } },
-    { "Union Station - Abandoned Shopping Plaza",
-      { "chb_dome_e.lvl", "chb_dome_n.lvl",
-        "chb_dome_h.lvl", "chb_dome_x.lvl" } },
-    { "Wetworks - Chemical Processing",
-      { "chb_render_e.lvl", "chb_render_n.lvl",
-        "chb_render_h.lvl", "chb_render_x.lvl" } },
-    { "Kagan's Tower - Skybridge",
-      { "chb_sky_e.lvl", "chb_sky_n.lvl",
-        "chb_sky_h.lvl", "chb_sky_x.lvl" } },
+        "a1_mansion_part1_battle_100.lvl",
+        "a1_mansion_part1_battle_250.lvl" },
+      { "a1_mansion_part1_battle_15g.lvl", "a1_mansion_part1_battle_25g.lvl",
+        "a1_mansion_part1_battle_50g.lvl", "a1_mansion_part1_battle_100g.lvl",
+        "a1_mansion_part1_battle_250g.lvl" }} },
+    { "Mod Horde", {{
+        "chb_hor_15.lvl", "chb_hor_25.lvl", "chb_hor_50.lvl",
+        "chb_hor_100.lvl", "chb_hor_250.lvl" },
+      { "chb_hor_15g.lvl", "chb_hor_25g.lvl", "chb_hor_50g.lvl",
+        "chb_hor_100g.lvl", "chb_hor_250g.lvl" }} },
 };
 #define NUM_ARENAS (sizeof(ARENAS)/sizeof(ARENAS[0]))
-// Fixed boss fights: story encounters launched directly, no count cycling.
-// Each is a renamed copy of the story level+script whose only edit is that
-// the post-fight chainTolevel returns to menu_level instead of continuing
-// the campaign, so the native fight (adds, cinematics) plays untouched.
-static const Entry BOSS[] = {
-    { "Zerenski",    "chb_boss_zerenski.lvl" },
-    { "Slezz",       "chb_boss_slezz.lvl" },
-    { "Ephemera",    "chb_boss_ephemera.lvl" },
-    { "Unraveller",  "chb_boss_unraveller.lvl" },
-};
-#define NUM_BOSSES (sizeof(BOSS)/sizeof(BOSS[0]))
 // Flat level list for best-time bookkeeping, built once at init from
-// ARENAS x counts followed by BOSS entries so the tables cannot diverge.
+// ARENAS x guns x counts so the tables cannot diverge.
 #define MAX_TRACKS 64
 static const char* TRACK_LVLS[MAX_TRACKS];
 static int NUM_TRACKS;
 static void BuildTrackList() {
-    int i, j;
+    int i, j, g;
     NUM_TRACKS = 0;
     for (i = 0; i < (int)NUM_ARENAS; ++i)
-        for (j = 0; j < NUM_CNT; ++j)
-            if (ARENAS[i].lvls[j] && NUM_TRACKS < MAX_TRACKS)
-                TRACK_LVLS[NUM_TRACKS++] = ARENAS[i].lvls[j];
-    for (i = 0; i < (int)NUM_BOSSES; ++i)
-        if (BOSS[i].lvl && NUM_TRACKS < MAX_TRACKS)
-            TRACK_LVLS[NUM_TRACKS++] = BOSS[i].lvl;
+        for (g = 0; g < 2; ++g)
+            for (j = 0; j < NUM_CNT; ++j)
+                if (ARENAS[i].lvls[g][j] && NUM_TRACKS < MAX_TRACKS)
+                    TRACK_LVLS[NUM_TRACKS++] = ARENAS[i].lvls[g][j];
 }
 // TRACK_LVLS index for a level file name, or -1.
 static int TrackIndexOf(const char* lvl) {
@@ -346,6 +327,30 @@ static int __cdecl FinishStandaloneSession() {
     g_challengeSession = false;
     return 1;
 }
+// Native race fix: the per-frame tracked-target updater at 0x66EE90 reloads
+// [ebx+0x8344] after the target's own vfunc (call eax @0x66EFDC) may have
+// destroyed the actor and cleared the slot -> the position getter 0x56A170 is
+// then called on ecx=0 (Suicide Run crash @0x56A176). Guard the getter entry:
+// a null object writes a zero vec to the out param instead of dereferencing.
+static void __declspec(naked) HookGetBonePos() {
+    __asm {
+        test ecx, ecx
+        jnz ok
+        mov eax, dword ptr [esp + 4]
+        xor edx, edx
+        mov dword ptr [eax], edx
+        mov dword ptr [eax + 4], edx
+        mov dword ptr [eax + 8], edx
+        ret 4
+    ok:
+        push ebp
+        mov ebp, esp
+        mov eax, dword ptr [ebp + 8]
+        push 0x56A176
+        ret
+    }
+}
+
 static void __declspec(naked) HookChallengeExit() {
     BR2_SAVE_CPU
     __asm { call FinishStandaloneSession }
@@ -377,10 +382,11 @@ typedef const char* (__cdecl *Localize_t)(const char*);
 static Localize_t Localize = (Localize_t)FN_LOCALIZE;
 
 // Fallback localization for the mod's own keys. The game's msglist is loaded
-// once at boot; on some first launches our appended keys are absent or the
-// table resolves in English, so our texts leak English while stock Spanish
-// is fine. When Localize misses (returns the key itself or NULL) we serve
-// our own strings indexed by the active language id at 0x7BF14C.
+// once at boot from world\<lang>\msglist.txt -- but the loose file sometimes
+// loses the open race to the POD's stock copy, leaving a stock table without
+// our keys. When Localize misses we serve our own strings in the language of
+// the ACTUALLY loaded table, fingerprinted through the stock key "Enemies"
+// (distinct value in every language). The old 0x7BF14C read was unreliable.
 // Column order: EN, FR, IT, ES, DE, JA(unused->0), RU
 typedef struct { const char* key; const char* t[7]; } ModLoc;
 static const ModLoc MODL[] = {
@@ -399,26 +405,31 @@ static const ModLoc MODL[] = {
  {"Custom", {"Custom","Personnalis\xE9","Personalizzato","Personalizado","Benutzerdefiniert",0,"\xCF\xEE\xEB\xFC\xE7\xEE\xE2\xE0\xF2\xE5\xEB\xFC\xF1\xEA\xE8\xE9"}},
  {"Kills", {"Kills","Victimes","Uccisioni","Bajas","Absch\xFCsse",0,"\xD3\xE1\xE8\xE9\xF1\xF2\xE2"}},
  {"Challenge Completed", {"Challenge Completed","D\xE9""fi termin\xE9","Sfida completata","Desaf\xEDo completado","Herausforderung gemeistert",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5 \xEF\xF0\xEE\xE9\xE4\xE5\xED\xEE"}},
- {"Arena", {"Arena","Ar\xE8ne","Arena","Arena","Arena",0,"\xC0\xF0\xE5\xED\xE0"}},
  {"Enemies", {"Enemies","Ennemis","Nemici","Enemigos","Gegner",0,"\xC2\xF0\xE0\xE3\xE8"}},
- {"Start Challenge", {"Start Challenge","Lancer le d\xE9""fi","Avvia sfida","Empezar desaf\xEDo","Herausforderung starten",0,"\xCD\xE0\xF7\xE0\xF2\xFC \xE8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5"}},
- {"Meatpacking", {"Meatpacking","Empaquetage des viandes","Meatpacking District","Dist. de empaquetado de carne","Schlachthofbezirk",0,"\xCC\xFF\xF1\xED\xEE\xE9 \xE7\xE0\xE2\xEE\xE4"}},
- {"Mansion - Roof", {"Mansion - Roof","Manoir : Toit","Palazzo - Tetto","Mansi\xF3n - Tejado","Villa - Dach",0,"\xCE\xF1\xEE\xE1\xED\xFF\xEA - \xCA\xF0\xFB\xF8\xE0"}},
- {"Mansion - Ballroom", {"Mansion - Ballroom","Manoir : Salle de bal","Palazzo - Sala da ballo","Mansi\xF3n - Sala de baile","Villa - Ballsaal",0,"\xCE\xF1\xEE\xE1\xED\xFF\xEA - \xC1\xE0\xEB\xFC\xED\xFB\xE9 \xE7\xE0\xEB"}},
- {"Union Station - Abandoned Shopping Plaza", {"Union Station - Abandoned Shopping Plaza","Gare : Galerie marchande abandonn\xE9""e","Union Station - Centro commerciale abbandonato","Union Station - Centro comercial abandonado","Union Station - Verlassenes Einkaufszentrum",0,"\xC2\xEE\xEA\xE7\xE0\xEB - \xC7\xE0\xE1\xF0\xEE\xF8\xE5\xED\xED\xFB\xE9 \xF2\xEE\xF0\xE3\xEE\xE2\xFB\xE9 \xF6\xE5\xED\xF2\xF0"}},
- {"Kagan's Tower - Skybridge", {"Kagan's Tower - Skybridge","Tour de Kagan : Pont a\xE9rien","Torre di Kagan - Lucernario","Torre de Kagan - Puente a\xE9reo","Kagans Turm - Br\xFC""cke",0,"\xC1\xE0\xF8\xED\xFF \xCA\xE5\xE9\xE3\xE0\xED\xE0 - \xCC\xEE\xF1\xF2 \xED\xE0\xE4 \xE1\xE5\xE7\xE4\xED\xEE\xE9"}},
- {"Wetworks - Chemical Processing", {"Wetworks - Chemical Processing","Centre de traitement des eaux : Station d'\xE9puration","Wetworks - Impianto chimico","Wetworks - Procesador qu\xEDmico","Wetworks - Chemische Verarbeitung",0,"\xC2\xE5\xF2\xE2\xEE\xF0\xEA\xF1 - \xD5\xE8\xEC\xE7\xE0\xE2\xEE\xE4"}},
- {"Boss", {"Boss","Boss","Boss","Jefe","Boss",0,"\xC1\xEE\xF1\xF1"}},
+ {"Mod Guns", {"Guns","Armes \xE0 feu","Pistole","Pistolas","Schusswaffen",0,"\xCF\xE8\xF1\xF2\xEE\xEB\xE5\xF2\xFB"}},
+ {"Yes", {"Yes","Oui","S\xEC","S\xED","Ja",0,"\xC4\xE0"}},
+ {"No", {"No","Non","No","No","Nein",0,"\xCD\xE5\xF2"}},
+ {"Mod Horde", {"Horde Mode","Mode horde","Modalit\xE0 orda","Modo horda","Horden-Modus",0,"\xD0\xE5\xE6\xE8\xEC \xEE\xF0\xE4\xFB"}},
  {"Mansion Battle", {"Mansion Battle","Bataille du manoir","Battaglia nella villa","Batalla de la mansi\xF3n","Villen-Kampf",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5"}},
  {"Skin", {"Skin","Apparence","Aspetto","Apariencia","Aussehen",0,"\xCE\xE1\xEB\xE8\xEA"}},
  {"Default", {"Default","Par d\xE9""faut","Predefinito","Por defecto","Standard",0,"\xCF\xEE \xF3\xEC\xEE\xEB\xF7\xE0\xED\xE8\xFE"}},
 };
+// Language id of the loaded msglist (1=EN 2=FR 3=IT 4=ES 5=DE 6=JA 7=RU),
+// deduced from the stock key "Enemies" so it always matches the real table.
+static int DetectLang(void) {
+    const char* e = Localize("Enemies");
+    if (!e) return 1;
+    if (!strcmp(e, "Ennemis"))  return 2;                     // FR
+    if (!strcmp(e, "Nemici"))   return 3;                     // IT
+    if (!strcmp(e, "Enemigos")) return 4;                     // ES
+    if (!strcmp(e, "Feinde") || !strcmp(e, "Gegner")) return 5; // DE
+    if (!strcmp(e, "\xC2\xF0\xE0\xE3\xE8")) return 7;         // RU "Враги" cp1251
+    return 1;                                                 // EN/JA/unknown
+}
 static const char* ModLocalize(const char* key) {
     const char* r = Localize(key);
     if (r && strcmp(r, key)) return r;          // table resolved -> use it
-    int i, lang;
-    __try { lang = *(int*)0x7BF14C; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { lang = 0; }
+    int i, lang = DetectLang();
     for (i = 0; i < (int)(sizeof MODL / sizeof MODL[0]); ++i)
         if (!strcmp(MODL[i].key, key)) {
             const char* s = (lang >= 1 && lang <= 7) ? MODL[i].t[lang - 1] : 0;
@@ -441,7 +452,9 @@ static char g_doneBuf[96];
 // Unset entries read back as 0 and render "--". The run clock accumulates the
 // engine's OWN scaled world delta at gameState+0x3D8 (slow-mo factor already
 // applied), sampled only while HudTick runs in a challenge (menus excluded).
-static DWORD g_bestTimes[MAX_TRACKS];
+// Best times are tracked per difficulty preset too: [Times_<Preset>] holds
+// the level-keyed records, so cycling Difficulty swaps every shown time.
+static DWORD g_bestTimes[MAX_TRACKS][NUM_PRESETS];
 static int   g_timeChal = -1;    // CHALLENGE index whose run is being timed
 static float g_runAccum;         // accumulated run seconds (game time)
 static int   g_runArmed;         // first enemy emitted -> clock counts
@@ -464,21 +477,27 @@ static void TimeKey(const char* lvl, char* out) {
     out[n] = 0;
 }
 static void LoadBestTimes() {
-    unsigned i; char key[64];
-    for (i = 0; i < NUM_TRACKS; ++i) {
-        TimeKey(TRACK_LVLS[i], key);
-        g_bestTimes[i] = GetPrivateProfileIntA("Times", key, 0, TIMES_FILE);
+    unsigned i; int d; char key[64], sec[40];
+    for (d = 0; d < NUM_PRESETS; ++d) {
+        sprintf(sec, "Times_%s", PRESETS[d].name);
+        for (i = 0; i < NUM_TRACKS; ++i) {
+            TimeKey(TRACK_LVLS[i], key);
+            g_bestTimes[i][d] = GetPrivateProfileIntA(sec, key, 0,
+                                                       TIMES_FILE);
+        }
     }
 }
 static int SaveBestTime(int idx, DWORD ms) {
-    char key[64], val[16];
+    char key[64], val[16], sec[40];
     if (idx < 0 || idx >= NUM_TRACKS) return 0;
-    if (g_bestTimes[idx] && ms >= g_bestTimes[idx]) return 0;
-    g_bestTimes[idx] = ms;
+    if (g_bestTimes[idx][g_diff] && ms >= g_bestTimes[idx][g_diff])
+        return 0;
+    g_bestTimes[idx][g_diff] = ms;
     TimeKey(TRACK_LVLS[idx], key);
     sprintf(val, "%u", (unsigned)ms);
-    WritePrivateProfileStringA("Times", key, NULL, TIMES_FILE);
-    WritePrivateProfileStringA("Times", key, val, TIMES_FILE);
+    sprintf(sec, "Times_%s", PRESETS[g_diff].name);
+    WritePrivateProfileStringA(sec, key, NULL, TIMES_FILE);
+    WritePrivateProfileStringA(sec, key, val, TIMES_FILE);
     return 1;
 }
 
@@ -703,9 +722,43 @@ static void __cdecl HudTick() {
     if (!IsStandaloneChallengeLevel(lvl)) return;
     if (menuOpen) return;
     if (!gso) return;
+    if (g_trigTrace) {
+        static DWORD s_lastDump = 0;
+        DWORD now = GetTickCount();
+        if (now - s_lastDump > 2000) {
+            s_lastDump = now;
+            if (!g_trigLog)
+                fopen_s(&g_trigLog, "br2mod_trig.log", "w");
+            if (g_trigLog) {
+                fprintf(g_trigLog, "--- lvl=%s\n", lvl);
+                DumpObjectiveTriggers(g_trigLog);
+            }
+        }
+    }
     ObjectiveProgress progress;
     if (!ReadObjectiveProgress(&progress))
         return; // no authoritative wave yet: do not display an estimate
+    // Fill the HUD labels the moment a live objective exists: the early-outs
+    // below (slot sanity / yield-to-script) used to run first, so a run that
+    // finished while the script's own display held the slot would build its
+    // completion text out of still-empty labels -> "- : 0'53'96 -".
+    if (!g_killsLbl[0]) {
+        const char* label = ModLocalize("Kills");
+        strncpy(g_killsLbl, (label && label[0]) ? label : "Kills",
+                sizeof g_killsLbl - 1);
+        g_killsLbl[sizeof g_killsLbl - 1] = 0;
+        const char* msg = ModLocalize("Challenge Completed");
+        strncpy(g_doneLbl, (msg && msg[0]) ? msg : "Challenge Completed",
+                sizeof g_doneLbl - 1);
+        g_doneLbl[sizeof g_doneLbl - 1] = 0;
+        const char* tl = ModLocalize("Time");
+        strncpy(g_timeLbl, (tl && tl[0]) ? tl : "Time", sizeof g_timeLbl - 1);
+        g_timeLbl[sizeof g_timeLbl - 1] = 0;
+        const char* rl = ModLocalize("New Record!");
+        strncpy(g_recLbl, (rl && rl[0]) ? rl : "New Record!",
+                sizeof g_recLbl - 1);
+        g_recLbl[sizeof g_recLbl - 1] = 0;
+    }
     if (!g_runArmed && progress.spawned > 0)
         g_runArmed = 1;              // combat actually begins with first spawn
     g_killCount = progress.spawned - progress.alive;
@@ -741,26 +794,11 @@ static void __cdecl HudTick() {
     const char* slot = (const char*)(gso + 0x3F0);
     float     dur  = *(float*)(gso + 0x4F0);
     if (dur < 0.0f || dur > 60.0f) return;    // slot sanity (transitions)
-    if (!done && slot[0] && dur > 0.0f && strcmp(slot, g_hudShown)) {
+    if (!done && !g_runArmed && slot[0] && dur > 0.0f
+        && strcmp(slot, g_hudShown)) {
         const char* p = slot;
         while (*p == ' ') ++p;
         if (*p) return;                     // real foreign text -> yield
-    }
-    // Localize only once, while we are known to be in live gameplay -- calling
-    // it mid level-load can walk a string table that is being rebuilt.
-    if (!g_killsLbl[0]) {
-        const char* label = ModLocalize("Kills");
-        strncpy(g_killsLbl, label ? label : "Kills", sizeof g_killsLbl - 1);
-        g_killsLbl[sizeof g_killsLbl - 1] = 0;
-        const char* msg = ModLocalize("Challenge Completed");
-        strncpy(g_doneLbl, msg ? msg : "Challenge Completed", sizeof g_doneLbl - 1);
-        g_doneLbl[sizeof g_doneLbl - 1] = 0;
-        const char* tl = ModLocalize("Time");
-        strncpy(g_timeLbl, tl ? tl : "Time", sizeof g_timeLbl - 1);
-        g_timeLbl[sizeof g_timeLbl - 1] = 0;
-        const char* rl = ModLocalize("New Record!");
-        strncpy(g_recLbl, rl ? rl : "New Record!", sizeof g_recLbl - 1);
-        g_recLbl[sizeof g_recLbl - 1] = 0;
     }
     const char* text = g_hudBuf;
     if (done) text = g_doneBuf[0] ? g_doneBuf : g_doneLbl;
@@ -906,19 +944,9 @@ static void __cdecl OnMenuBuilt() {
 
 // The native builder prologue runs even for our empty jump-table slot.
 // Fill rows only from its epilogue; CallMenu owns selection/stack changes.
-static int g_arenaSel = 0;      // ARENAS index shown on the cycler
 static int g_countSel = 1;      // COUNTS index shown on the cycler (25 default)
-
-// First available count slot for an arena (skips NULL lvls).
-static int ArenaFirstCount(int a) {
-    int j;
-    for (j = 0; j < NUM_CNT; ++j) if (ARENAS[a].lvls[j]) return j;
-    return 0;
-}
-// True while the selected arena provides the selected count.
-static int ArenaCountValid(int a, int c) {
-    return c >= 0 && c < NUM_CNT && ARENAS[a].lvls[c] != 0;
-}
+static int g_guns = 0;          // 0 = blades only, 1 = bloodguns too
+static volatile LONG g_chalDirty = 0;  // [Challenge] count/guns need flushing
 
 static void FormatBest(DWORD best, char* tb) {
     if (best) sprintf(tb, "%u'%02u'%02u", best / 60000u,
@@ -928,37 +956,27 @@ static void FormatBest(DWORD best, char* tb) {
 
 static void BuildChallengeMenu() {
     int i;
-    const char* btl = ModLocalize("Best Time");
-    if (!btl) btl = "Best Time";
-    if (!ArenaCountValid(g_arenaSel, g_countSel))
-        g_countSel = ArenaFirstCount(g_arenaSel);
     *(int*)G_ITEM_COUNT = 0;
     // Label buffer inside a menu item is 72 bytes: keep texts under it.
     char lbl[72], tb[16];
-    _snprintf(lbl, sizeof lbl - 1, "%s: %s",
-              ModLocalize("Arena"), ModLocalize(ARENAS[g_arenaSel].name));
-    lbl[sizeof lbl - 1] = 0;
-    AddMenuItem(lbl, AC_ARENA_CYCLE, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %d",
               ModLocalize("Enemies"), COUNTS[g_countSel]);
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_COUNT_CYCLE, 0);
-    i = TrackIndexOf(ARENAS[g_arenaSel].lvls[g_countSel]);
-    FormatBest(i >= 0 ? g_bestTimes[i] : 0, tb);
-    _snprintf(lbl, sizeof lbl - 1, "%s: %s", btl, tb);
+    _snprintf(lbl, sizeof lbl - 1, "%s: %s",
+              ModLocalize("Mod Guns"),
+              ModLocalize(g_guns ? "Yes" : "No"));
     lbl[sizeof lbl - 1] = 0;
-    AddMenuItem(lbl, 0, 0);                 // inert info row
-    AddMenuItem(ModLocalize("Start Challenge"), AC_CHAL_START, 0);
-    // Fixed boss fights at the end, clearly tagged, no count cycling.
-    for (i = 0; i < (int)NUM_BOSSES; ++i) {
-        int ti;
-        if (!BOSS[i].lvl) continue;
-        ti = TrackIndexOf(BOSS[i].lvl);
-        FormatBest(ti >= 0 ? g_bestTimes[ti] : 0, tb);
-        _snprintf(lbl, sizeof lbl - 1, "%s: %s - %s: %s",
-                  ModLocalize("Boss"), ModLocalize(BOSS[i].title), btl, tb);
+    AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
+    // One launch row per arena; its best time tracks the selected
+    // count + guns + difficulty combination.
+    for (i = 0; i < (int)NUM_ARENAS; ++i) {
+        int ti = TrackIndexOf(ARENAS[i].lvls[g_guns][g_countSel]);
+        FormatBest(ti >= 0 ? g_bestTimes[ti][g_diff] : 0, tb);
+        _snprintf(lbl, sizeof lbl - 1, "%s - %s",
+                  ModLocalize(ARENAS[i].name), tb);
         lbl[sizeof lbl - 1] = 0;
-        AddMenuItem(lbl, AC_BOSS_BASE + i, BOSS[i].lvl);
+        AddMenuItem(lbl, AC_ARENA_BASE + i, 0);
     }
     AddMenuItem(ModLocalize("Back to Main Menu"), AC_BACK, 0);
 }
@@ -997,36 +1015,24 @@ static int __cdecl DispatchOurs(int action) {
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
-    if (action == AC_ARENA_CYCLE) {
-        int j;
-        g_arenaSel = (g_arenaSel + 1) % (int)NUM_ARENAS;
-        // keep the count if the new arena has it, else first available
-        if (!ArenaCountValid(g_arenaSel, g_countSel)) {
-            for (j = 0; j < NUM_CNT; ++j)
-                if (ARENAS[g_arenaSel].lvls[j]) { g_countSel = j; break; }
-        }
+    if (action == AC_COUNT_CYCLE) {
+        g_countSel = (g_countSel + 1) % NUM_CNT;
+        InterlockedExchange(&g_chalDirty, 1);
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
-    if (action == AC_COUNT_CYCLE) {
-        int j;
-        for (j = 1; j <= NUM_CNT; ++j) {
-            int c = (g_countSel + j) % NUM_CNT;
-            if (ARENAS[g_arenaSel].lvls[c]) { g_countSel = c; break; }
-        }
+    if (action == AC_GUNS_CYCLE) {
+        g_guns ^= 1;
+        InterlockedExchange(&g_chalDirty, 1);
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
     const char* lvl = NULL;
     int i;
     g_timeChal = -1;
-    if (action == AC_CHAL_START) {
-        if (ArenaCountValid(g_arenaSel, g_countSel))
-            lvl = ARENAS[g_arenaSel].lvls[g_countSel];
-    }
-    i = action - AC_BOSS_BASE;
-    if (!lvl && i >= 0 && i < (int)NUM_BOSSES && BOSS[i].lvl)
-        lvl = BOSS[i].lvl;
+    i = action - AC_ARENA_BASE;
+    if (i >= 0 && i < (int)NUM_ARENAS)
+        lvl = ARENAS[i].lvls[g_guns][g_countSel];
     i = action - AC_EXTRA_BASE;
     const Entry* e = NULL;
     if (!lvl && i >= 0 && i < (int)(sizeof(EXTRA)/sizeof(EXTRA[0])))
@@ -1586,6 +1592,7 @@ static void LoadConfig() {
     g_legacyGuards = GetPrivateProfileIntA("Diagnostics","LegacyGuards",0,".\\br2mod.ini");
     g_chainTrace = GetPrivateProfileIntA("Diagnostics","ChainTrace",0,".\\br2mod.ini");
     g_diffTrace = GetPrivateProfileIntA("Diagnostics","DifficultyTrace",0,".\\br2mod.ini");
+    g_trigTrace = GetPrivateProfileIntA("Diagnostics","TrigTrace",0,".\\br2mod.ini");
     char buf[64];
     GetPrivateProfileStringA("Difficulty", "preset", "Dhampir",
                              buf, sizeof buf, ".\\br2mod.ini");
@@ -1593,6 +1600,14 @@ static void LoadConfig() {
         if (!_stricmp(buf, PRESETS[i].name)) g_diff = i;
     GetPrivateProfileStringA("Appearance", "skin", "default",
                              g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
+    {   // remembered challenge options
+        int n = GetPrivateProfileIntA("Challenge", "count", 25,
+                                      ".\\br2mod.ini");
+        for (int i = 0; i < NUM_CNT; ++i)
+            if (COUNTS[i] == n) { g_countSel = i; break; }
+        g_guns = GetPrivateProfileIntA("Challenge", "guns", 0,
+                                       ".\\br2mod.ini") ? 1 : 0;
+    }
 }
 
 static DWORD WINAPI Worker(LPVOID) {
@@ -1613,6 +1628,7 @@ static DWORD WINAPI Worker(LPVOID) {
     }
     PatchChecked(0x55EB10,"\x55\x8b\xec\x6a\xff\x68\xf5\x27\x6d\x00",10,HookMenuBegin);
     PatchChecked(0x609D90,"\x55\x8b\xec\x56\x8b\xf1",6,HookFeedMotionRequest);
+    PatchChecked(0x56A170,"\x55\x8b\xec\x8b\x45\x08",6,HookGetBonePos);
     PatchSite((void*)0x561E1A, 6, HookA);
     PatchSite((void*)0x5670E1, 12, HookB);
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
@@ -1666,6 +1682,15 @@ static DWORD WINAPI Worker(LPVOID) {
             WritePrivateProfileStringA("Appearance", "skin", NULL, ".\\br2mod.ini");
             WritePrivateProfileStringA("Appearance", "skin",
                                        g_skinIni, ".\\br2mod.ini");
+        }
+        if (InterlockedExchange(&g_chalDirty, 0)) {
+            char vb[8];
+            sprintf(vb, "%d", COUNTS[g_countSel]);
+            WritePrivateProfileStringA("Challenge", "count", NULL, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "count", vb, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "guns", NULL, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "guns",
+                                       g_guns ? "1" : "0", ".\\br2mod.ini");
         }
     }
 }
