@@ -85,8 +85,10 @@ static const Preset PRESETS[] = {
     { "Dhampir",    1.00f, 1.00f, 1.00f },
     { "Overlord",   1.50f, 0.75f, 1.50f },
     { "Unraveller", 2.00f, 0.50f, 2.00f },
+    { "Custom",     1.00f, 1.00f, 1.00f },  // multipliers live in br2mod.ini
 };
-#define NUM_PRESETS 4
+#define NUM_PRESETS 5
+#define DIFF_CUSTOM  4
 static int g_diff = 1;
 static char g_pendingChain[64];
 static int g_legacyGuards = 0;
@@ -106,7 +108,18 @@ static void __cdecl LogDmgHit(const char* kind) {
             (double)(g_hOld - g_new * g_mult));
     fflush(g_dlog);
 }
+static float IniFloat(const char* key, const char* def) {
+    char b[32];
+    GetPrivateProfileStringA("Custom", key, def, b, sizeof b, ".\\br2mod.ini");
+    return (float)atof(b);
+}
 static void ApplyPreset() {
+    if (g_diff == DIFF_CUSTOM) {
+        g_dmgIn  = IniFloat("dmgIn",  "1.0");
+        g_dmgOut = IniFloat("dmgOut", "1.0");
+        g_cost   = IniFloat("cost",   "1.0");
+        return;
+    }
     g_dmgIn  = PRESETS[g_diff].dmgIn;
     g_dmgOut = PRESETS[g_diff].dmgOut;
     g_cost   = PRESETS[g_diff].cost;
