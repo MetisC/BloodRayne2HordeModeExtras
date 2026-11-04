@@ -378,11 +378,203 @@ static void TrackHudLevel() {
     }
 }
 
+// ---- feed-grab diagnostic: [Diagnostics] feedLog=1 --------------------------
+// Logs the grabbed victim's anim/orientation candidates every frame so we can
+// see exactly when the enemy stops turning relative to Rayne's grab anim.
+static volatile unsigned g_feedMotionBlocks;
+static int   g_feedLog = -1;
+static DWORD g_feedVictim;
+static FILE* g_feedFp;
+static int   g_feedFrame;
+static void FeedDiagTick() {
+    DWORD rayne, victim;
+    __try { rayne = *(DWORD*)0x61276EC; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!rayne) return;
+    __try { victim = *(DWORD*)(rayne + 0x83C0); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (g_feedLog < 0)
+        g_feedLog = GetPrivateProfileIntA("Diagnostics", "feedLog", 0,
+                                          ".\\br2mod.ini");
+    if (!g_feedLog) return;
+    if (!victim) {
+        if (g_feedFp) { fclose(g_feedFp); g_feedFp = NULL; }
+        g_feedVictim = 0;
+        return;
+    }
+    if (victim != g_feedVictim) {
+        DWORD vtbl = 0;
+        __try { vtbl = *(DWORD*)victim; }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (g_feedFp) fclose(g_feedFp);
+        g_feedFp = fopen("br2mod_feed.log", "a");
+        g_feedVictim = victim;
+        g_feedFrame = 0;
+        if (g_feedFp) fprintf(g_feedFp, "victim=%08x vtbl=%08x\n",
+                              victim, vtbl);
+    }
+    if (!g_feedFp) return;
+    DWORD ranim, vanim; float f[12], rp[3], rframe, vframe;
+    __try {
+        ranim = *(DWORD*)(rayne + 0x17C);
+        vanim = *(DWORD*)(victim + 0x17C);
+        memcpy(f, (void*)(victim + 0x38), 8 * 4);           // +0x38..+0x54
+        f[8]  = *(float*)(victim + 0x628);
+        f[9]  = *(float*)(victim + 0x39C8);
+        f[10] = *(float*)(victim + 0x39CC);
+        f[11] = *(float*)(victim + 0x24);
+        memcpy(rp,(void*)(rayne+0x38),sizeof rp);
+        rframe = *(float*)(rayne+0x180);
+        vframe = *(float*)(victim+0x180);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    fprintf(g_feedFp,
+            "%3d R=%03x V=%03x 38=%.3f 3c=%.3f 40=%.3f 44=%.3f 48=%.3f "
+            "4c=%.3f 50=%.3f 54=%.3f 628=%.3f c8=%.4f cc=%.4f 24=%.4f "
+            "Rpos=(%.3f,%.3f,%.3f) Rframe=%.3f Vframe=%.3f blocked=%u\n",
+            g_feedFrame++, ranim, vanim, f[0], f[1], f[2], f[3], f[4],
+            f[5], f[6], f[7], f[8], f[9], f[10], f[11],
+            rp[0],rp[1],rp[2],rframe,vframe,g_feedMotionBlocks);
+}
+
+// ---- feed wind-up yaw pin ---------------------------------------------------
+// While Rayne's grab lunge plays (anims 0xE3/0xE5/0xE7/0xF3) the victim is
+// already locked (Rayne+0x83C0) but the "you are grabbed" commit only arrives
+// with the drain anim. If the enemy's AI was steering it keeps turning for
+// ~50 frames -> the back-feed then plays on an enemy facing Rayne. While the
+// victim is targeted and NOT yet in a grabbed anim (0x70-0x85) we pin its yaw
+// field (victim+0x48; +0x50 facing is derived from it) so it just stays put.
+// Victims already in the grabbed anim keep the native sync alignment.
+static DWORD g_pinVictim;
+static DWORD g_initVictim;
+static DWORD g_seen73;
+static int   g_pinActive;
+static float g_pinYaw;
+typedef void (__thiscall* PlayAnim_t)(void* self, int anim, float f1, float f2);
+#define PLAYANIM ((PlayAnim_t)0x658EB0)
+// The native grabbed anim the victim should hold per Rayne wind-up anim
+// (from live feed logs: f3->0x73, e3->0x42, e5->0x70, e7->0x71).
+static int FeedExpectedVictimAnim(DWORD ranim) {
+    switch (ranim) {
+    case 0xE3: return 0x42;
+    case 0xE5: return 0x70;
+    case 0xE7: return 0x71;
+    case 0xF3: return 0x73;
+    }
+    return -1;
+}
+
+// Preserve a rear-grab clip only AFTER native contact has requested it.
+// Replaying 73 at frame zero from the render callback can anticipate contact
+// and repeatedly discard root-motion progress while Rayne keeps lunging.
+// While the victim holds 0x73 during the F3 wind-up, drop ANY request that is
+// not a grabbed-family anim (locomotion AND combat anims alike: 0x08/0x16/
+// 0x5A/0x5B/0x41 and 0x11/0x19/0x6A/0x68/0x69/0x6C/0x6E seen in live logs).
+static int __cdecl KeepNativeRearFeedPose(DWORD controller,int requested) {
+    if ((requested >= 0x70 && requested <= 0x85) || requested == 0x42)
+        return 0;                       // grabbed family -> always allow
+    __try {
+        DWORD rayne = *(DWORD*)0x61276EC;
+        if (!rayne || *(DWORD*)(rayne+0x17C)!=0xF3) return 0;
+        DWORD victim = *(DWORD*)(rayne+0x83C0);
+        if (!victim || controller!=victim+0x158) return 0;
+        if (*(DWORD*)(victim+0x17C)!=0x73 || !(*(float*)(victim+0x39C8)>0.0f)) return 0;
+        ++g_feedMotionBlocks;
+        return 1;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static void __declspec(naked) HookFeedMotionRequest() {
+    __asm { push ebp }
+    __asm { mov ebp,esp }
+    BR2_SAVE_CPU
+    __asm { push dword ptr [ebp+8] }
+    __asm { push ecx }
+    __asm { call KeepNativeRearFeedPose }
+    __asm { add esp,8 }
+    __asm { mov [esp+556],eax }
+    BR2_RESTORE_CPU
+    __asm {
+        test eax,eax
+        jz native
+        pop ebp
+        ret 0xC
+    native:
+        push esi
+        mov esi,ecx
+        push 0x609D96
+        ret
+    }
+}
+static void FeedYawPinTick() {
+    DWORD rayne = 0, victim = 0, ranim = 0, vanim = 0;
+    __try {
+        rayne = *(DWORD*)0x61276EC;
+        if (!rayne) { g_pinVictim = 0; g_pinActive = 0; return; }
+        victim = *(DWORD*)(rayne + 0x83C0);
+        ranim  = *(DWORD*)(rayne + 0x17C);
+        if (victim) vanim = *(DWORD*)(victim + 0x17C);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; return; }
+    int expected = FeedExpectedVictimAnim(ranim);
+    if (!victim || expected < 0) { g_pinVictim = 0; g_pinActive = 0; return; }
+    if (ranim==0xF3) {
+        // Native contact usually requests 0x73 at frame 0 -- but victims in
+        // combat anims (0x11/0x19/0x6A/...) are never granted it by the
+        // classifier and keep attacking/turning through the whole wind-up.
+        // Fire the same request ONCE per victim (re-fire only if it already
+        // held 0x73 and was bounced out -- an ineligible victim degrades to
+        // native behaviour, never a request spam/restart loop).
+        __try {
+            int alive = (*(float*)(victim + 0x39C8) > 0.0f);
+            if (vanim == 0x73) g_seen73 = victim;
+            int kicked = (g_initVictim != victim) || (g_seen73 == victim);
+            if (vanim != 0x73 && vanim != 0x74 && alive && kicked) {
+                PLAYANIM((void*)victim, 0x73, 0.0f, -1.0f);
+                g_initVictim = victim;
+                if (victim != g_pinVictim || !g_pinActive) {
+                    g_pinVictim = victim;
+                    g_pinYaw = *(float*)(victim + 0x48);
+                    g_pinActive = 1;
+                }
+                *(float*)(victim + 0x48) = g_pinYaw;
+            } else {
+                g_pinActive = 0;   // held: native sync alignment owns yaw
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; }
+        return;
+    }
+    __try {
+        // The victim entered its grabbed anim at contact, but its AI keeps
+        // steering until the drain commit and re-issues locomotion anims
+        // (0x08/0x16/0x5A/0x5B/0x41...), bouncing it out. Re-request the
+        // proper grabbed anim through the engine's own PlayAnim -- it is a
+        // no-op while the clip already matches, so this only fires on the
+        // frames the AI bounced it. Grabbed anims in the 0x70-0x85 range or
+        // 0x42 are left alone (legit commit/other variants).
+        int grabbed = (vanim >= 0x70 && vanim <= 0x85) || vanim == 0x42;
+        if (!grabbed) {
+            PLAYANIM((void*)victim, expected, 0.0f, -1.0f);
+            if (victim != g_pinVictim || !g_pinActive) {
+                g_pinVictim = victim;
+                g_pinYaw = *(float*)(victim + 0x48);
+                g_pinActive = 1;
+            }
+            *(float*)(victim + 0x48) = g_pinYaw;
+        } else {
+            g_pinActive = 0;   // held anim: native sync alignment owns yaw
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; }
+}
+
 // Called immediately BEFORE the native onscreen-text renderer, after scripts
 // and the normal timer update. Blank banners cannot overwrite us later in
 // the same frame. The script interpreter and the level loader stay native.
 static void __cdecl HudTick() {
     TrackHudLevel();
+    FeedDiagTick();
+    FeedYawPinTick();
     const char* lvl = (const char*)0x5E33258;
     int menuOpen = *(DWORD*)0x5EF4BF8 != 0;   // any menu open -> not in gameplay
     DWORD gso = *(DWORD*)0x7C07F8;
@@ -1241,6 +1433,7 @@ static DWORD WINAPI Worker(LPVOID) {
         PatchChecked(0x4A2953,"\x8b\x45\x08\x50\x53\x8b\xce",7,HookEffectLoadTrace);
     }
     PatchChecked(0x55EB10,"\x55\x8b\xec\x6a\xff\x68\xf5\x27\x6d\x00",10,HookMenuBegin);
+    PatchChecked(0x609D90,"\x55\x8b\xec\x56\x8b\xf1",6,HookFeedMotionRequest);
     PatchSite((void*)0x561E1A, 6, HookA);
     PatchSite((void*)0x5670E1, 12, HookB);
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
