@@ -26,6 +26,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
+#define DIRECTINPUT_VERSION 0x0800
+#include <dinput.h>
+#include <xinput.h>
+#pragma comment(lib, "user32.lib")
 
 // ----------------------------- addresses ----------------------------------
 #define FN_LOCALIZE      0x5898A0  // localize(english)->localized
@@ -68,6 +73,7 @@ static const DWORD HIT_FSTP_EAX[] = { 0x55C3A5 };
 static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 
 #define MENU_MAIN      0x01
+#define MENU_PAUSE     0x0E
 #define MENU_EXTRAS    0x0F        // native Extras menu
 #define MENU_OPTIONS   0x17
 #define MENU_CHALLENGE 0x3D        // free slot -> lands on hooked epilogue
@@ -79,6 +85,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_GUNS_CYCLE     0x114    // cycle weapons on/off for the run
 #define AC_BACK           0x11C
 #define AC_SKIN           0x11D
+#define AC_PHOTO          0x11E
 #define AC_EXTRA_BASE     0x120    // 0x120.. extra launches
 #define AC_ARENA_BASE     0x130    // 0x130.. arena launches at selected count
 
@@ -315,6 +322,7 @@ static void __declspec(naked) HookMenuBegin() {
 }
 
 static bool g_challengeSession;
+static bool g_photoBlockingMenu;
 static int __cdecl FinishStandaloneSession() {
     if (!g_challengeSession) return 0;
     const char* current = (const char*)0x5E33258;
@@ -352,16 +360,23 @@ static void __declspec(naked) HookGetBonePos() {
 }
 
 static void __declspec(naked) HookChallengeExit() {
+    __asm {
+        cmp g_photoBlockingMenu, 0
+        je normal
+        mov eax, 1
+        ret
+    normal:
+    }
     BR2_SAVE_CPU
     __asm { call FinishStandaloneSession }
     __asm { mov [esp+556],eax }
     BR2_RESTORE_CPU
     __asm {
         test eax,eax
-        jz normal
+        jz native
         xor eax,eax
         ret
-    normal:
+    native:
         push 0x4F7810
         ret
     }
@@ -707,6 +722,7 @@ static void FeedYawPinTick() {
 // and the normal timer update. Blank banners cannot overwrite us later in
 // the same frame. The script interpreter and the level loader stay native.
 static void __cdecl HudTick() {
+    if (g_photoBlockingMenu) return;
     TrackHudLevel();
     FeedDiagTick();
     FeedYawPinTick();
@@ -882,6 +898,8 @@ static void __declspec(naked) AddMenuItem(const char* text, int action,
     }
 }
 
+#include "photo_mode.inl"
+
 // ------------------------- menu build logic --------------------------------
 static void BuildChallengeMenu();
 static void __cdecl OnMenuBuilt() {
@@ -889,6 +907,9 @@ static void __cdecl OnMenuBuilt() {
     int id = *(int*)G_MENU_STATE;
     unsigned i;
     switch (id) {
+    case MENU_PAUSE:
+        AddPhotoMenuItem();
+        break;
     case MENU_MAIN: {
         AddMenuItem(ModLocalize("Challenge Mode"), AC_CHALLENGE_MENU, 0);
         // mover nuestro item ANTES de "Extras": items [NG,Load,Opt,Ext,Quit,CH]
@@ -986,6 +1007,10 @@ static void BuildChallengeMenu() {
 static int __cdecl DispatchOurs(int action) {
     Trace("ACTION code=%X",action);
     TraceGlobals("action");
+    if (action == AC_PHOTO) {
+        RequestPhotoFromPause();
+        return 0;
+    }
     if (action == AC_CHALLENGE_MENU) { CallMenu(MENU_CHALLENGE); return 0; }
     if (action == AC_BACK)           { MenuBack();              return 0; }
     if (action == AC_DIFFICULTY) {
@@ -1634,6 +1659,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
     PatchCallChecked(0x4F9137,"\xE8\xD4\xE6\xFF\xFF",5,HookChallengeExit);
+    InstallPhotoMode();
     // 0x4CD940 (display setter call) detour removed: unstable, see note above.
     ApplyPreset();
     for (unsigned i = 0; i < sizeof(HEALTH_DMG_SITES)/sizeof(HEALTH_DMG_SITES[0]); ++i)
