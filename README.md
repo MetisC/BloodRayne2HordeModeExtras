@@ -13,8 +13,12 @@ Gunsucked).
     infiltrated-party fight) and **Horde Mode** (the `SPAWN_*` arena)
   - **Enemies** cycler — 15 / 25 / 50 / 100 / 250
   - **Guns** toggle — Yes/No, persisted in the ini
-  - **Best time** per count + guns setting + difficulty preset, shown on the
-    launch row and stored in `br2mod_times.ini` (never touches the save)
+  - **Health and Rage** toggle — Base (1,000 each) or Maximum (2,000 each),
+    persisted in the ini. The arena starts with full health and empty rage
+    on every load or restart. Capacity stays fixed and Carnage rank-ups
+    give no refills in these arenas.
+  - **Best time** per arena, count, guns setting, difficulty and capacity,
+    shown on the launch row and stored in `br2mod_times.ini`
   - Localized `!New Record!` banner when a run beats the stored time
 - Global **Difficulty** under Options: `Minion | Dhampir | Overlord |
   Unraveller | Custom` — real gameplay scaling; `Custom` reads live
@@ -104,11 +108,13 @@ skin=default          ; "default" = native outfit system untouched
 [Challenge]
 count=25              ; 15 | 25 | 50 | 100 | 250
 guns=0                ; 0 = No | 1 = Yes
+maxBars=0             ; 0 = Base | 1 = Maximum
 ```
 
 `Custom` multipliers are read from the ini each time the preset is
 applied — select `Custom` in Options > Difficulty (or re-select it after
 editing the ini). Chosen menu values are written back so they persist.
 
-`br2mod_times.ini` is created on first completed run — best times per
-level/count/guns/difficulty. Deleting it only resets records.
+`br2mod_times.ini` stores new records under
+`[Times_v2_<Difficulty>_BarsBase]` and `[Times_v2_<Difficulty>_BarsMax]`.
+The previous sections are kept as an archive and excluded from comparisons.

@@ -45,6 +45,9 @@
 #define G_SELIDX        0x5EF4AE8  // selected row (restored by MenuBack)
 #define G_PICKED_LVL    0x5EF4948
 #define G_GAME_STATE    0x7C07F8   // +0x1E8 = (dead) difficulty field
+#define G_CURRENT_LEVEL 0x5E33258
+#define G_SITUATION     0x7C2478
+#define G_CARNAGE       0x7BF4BC
 #define G_HANDLER_ARRAY 0x5DCC0A0  // [0]=POD 0x5A3FD0 [1]=loose 0x4937B0
 #define G_PLAYER_OBJ    0x61276EC  // [ptr] Rayne object (from gunsucked rayne2.CT)
 
@@ -83,6 +86,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_DIFFICULTY     0x111
 #define AC_COUNT_CYCLE    0x113    // cycle enemy-count selection
 #define AC_GUNS_CYCLE     0x114    // cycle weapons on/off for the run
+#define AC_BARS_CYCLE     0x115
 #define AC_BACK           0x11C
 #define AC_SKIN           0x11D
 #define AC_PHOTO          0x11E
@@ -265,19 +269,17 @@ static void BuildTrackList() {
                 if (ARENAS[i].lvls[g][j] && NUM_TRACKS < MAX_TRACKS)
                     TRACK_LVLS[NUM_TRACKS++] = ARENAS[i].lvls[g][j];
 }
-// TRACK_LVLS index for a level file name, or -1.
-static int TrackIndexOf(const char* lvl) {
-    int i;
+static const char* LevelBasename(const char* lvl) {
     const char* base = lvl;
     for (const char* p = lvl; *p; ++p)
         if (*p == '\\' || *p == '/') base = p + 1;
-    for (i = 0; i < NUM_TRACKS; ++i) {
-        const char* t = TRACK_LVLS[i];
-        const char* tb = t;
-        for (const char* p = t; *p; ++p)
-            if (*p == '\\' || *p == '/') tb = p + 1;
-        if (!_stricmp(base, tb)) return i;
-    }
+    return base;
+}
+// TRACK_LVLS index for a level file name, or -1.
+static int TrackIndexOf(const char* lvl) {
+    const char* base = LevelBasename(lvl);
+    for (int i = 0; i < NUM_TRACKS; ++i)
+        if (!_stricmp(base, LevelBasename(TRACK_LVLS[i]))) return i;
     return -1;
 }
 static const Entry EXTRA[] = {
@@ -422,6 +424,9 @@ static const ModLoc MODL[] = {
  {"Challenge Completed", {"Challenge Completed","D\xE9""fi termin\xE9","Sfida completata","Desaf\xEDo completado","Herausforderung gemeistert",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5 \xEF\xF0\xEE\xE9\xE4\xE5\xED\xEE"}},
  {"Enemies", {"Enemies","Ennemis","Nemici","Enemigos","Gegner",0,"\xC2\xF0\xE0\xE3\xE8"}},
  {"Mod Guns", {"Guns","Armes \xE0 feu","Pistole","Pistolas","Schusswaffen",0,"\xCF\xE8\xF1\xF2\xEE\xEB\xE5\xF2\xFB"}},
+ {"Challenge Bars", {"Health and Rage","Vie et rage","Vita e furia","Vida y furia","Leben und Wut",0,"\xC7\xE4\xEE\xF0\xEE\xE2\xFC\xE5 \xE8 \xFF\xF0\xEE\xF1\xF2\xFC"}},
+ {"Challenge Bars Base", {"Base","Base","Base","Base","Basis",0,"\xC1\xE0\xE7\xE0"}},
+ {"Challenge Bars Maximum", {"Maximum","Maximales","Massime","M\xE1ximas","Maximal",0,"\xCC\xE0\xEA\xF1\xE8\xEC\xF3\xEC"}},
  {"Yes", {"Yes","Oui","S\xEC","S\xED","Ja",0,"\xC4\xE0"}},
  {"No", {"No","Non","No","No","Nein",0,"\xCD\xE5\xF2"}},
  {"Mod Horde", {"Horde Mode","Mode horde","Modalit\xE0 orda","Modo horda","Horden-Modus",0,"\xD0\xE5\xE6\xE8\xEC \xEE\xF0\xE4\xFB"}},
@@ -463,18 +468,66 @@ static char g_timeLbl[40];
 static char g_recLbl[48];
 static char g_doneBuf[96];
 
-// ---- best times: persisted in .\br2mod_times.ini [Times] <lvlspec>=<ms> ----
+enum ChallengeBars { BarsBase, BarsMaximum, BarsCount };
+static int g_bars = BarsBase;
+static int g_runBars = -1;      // latched on native level load/restart
+static void* g_runSituation;
+
+// ---- best times: .\br2mod_times.ini [Times_v2_<Preset>_Bars<Base|Max>] ----
 // Unset entries read back as 0 and render "--". The run clock accumulates the
 // engine's OWN scaled world delta at gameState+0x3D8 (slow-mo factor already
 // applied), sampled only while HudTick runs in a challenge (menus excluded).
-// Best times are tracked per difficulty preset too: [Times_<Preset>] holds
-// the level-keyed records, so cycling Difficulty swaps every shown time.
-static DWORD g_bestTimes[MAX_TRACKS][NUM_PRESETS];
+// The old Times_<Preset> sections lack a bars profile and are never read.
+static DWORD g_bestTimes[MAX_TRACKS][NUM_PRESETS][BarsCount];
 static int   g_timeChal = -1;    // CHALLENGE index whose run is being timed
 static float g_runAccum;         // accumulated run seconds (game time)
 static int   g_runArmed;         // first enemy emitted -> clock counts
 static int   g_runDone;          // completion latched -> no more counting
 static int   g_newRecord;        // last completion beat the stored best
+static int   g_doneStreak;
+
+static int ChallengeBarsRank(int bars) {
+    return bars == BarsMaximum ? 10 : 0;
+}
+
+static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
+    ((void (__thiscall*)(void*, int))0x4F5640)(game, flag);
+    g_runBars = -1;
+    g_runSituation = NULL;
+    g_timeChal = TrackIndexOf((const char*)G_CURRENT_LEVEL);
+    g_hudLvl[0] = 0;
+    g_hudShown[0] = 0;
+    g_killCount = 0;
+    g_runArmed = 0;
+    g_runDone = 0;
+    g_runAccum = 0.0f;
+    g_doneStreak = 0;
+    if (g_timeChal < 0) return;
+
+    // Same Rayne resolver as the native level initialization at 0x4F9076.
+    typedef BYTE* (__cdecl* ResolveActor)(void*, void*);
+    BYTE* rayne = ((ResolveActor)0x4050C0)(*(void**)0x7DCD68, *(void**)0x5EC07B0);
+    if (!rayne || !*(void**)G_SITUATION) return;
+
+    // The native update uses capacity = 1000 + 100 * Carnage rank.
+    g_runBars = g_bars;
+    g_runSituation = *(void**)G_SITUATION;
+    const float capacity = 1000.0f + 100.0f * ChallengeBarsRank(g_runBars);
+    *(float*)(rayne + 0x39C8) = capacity; // health starts full
+    *(float*)(rayne + 0x39CC) = capacity;
+    *(float*)(rayne + 0x8360) = 0.0f;    // rage starts empty
+    *(float*)(rayne + 0x8364) = capacity;
+}
+
+static int __fastcall HookChallengeBarsRank(void* carnage, void*) {
+    if (g_runBars >= 0 && g_timeChal >= 0 &&
+        g_runSituation == *(void**)G_SITUATION &&
+        carnage == *(void**)G_CARNAGE &&
+        !_stricmp(LevelBasename((const char*)G_CURRENT_LEVEL),
+                  LevelBasename(TRACK_LVLS[g_timeChal])))
+        return ChallengeBarsRank(g_runBars);
+    return ((int (__thiscall*)(void*))0x4D5A40)(carnage);
+}
 
 #define TIMES_FILE ".\\br2mod_times.ini"
 static void FormatTime(DWORD ms, char* out) {
@@ -491,27 +544,31 @@ static void TimeKey(const char* lvl, char* out) {
         out[n] = (char)tolower((unsigned char)base[n]);
     out[n] = 0;
 }
+static void TimeSection(int difficulty, int bars, char* out) {
+    sprintf(out, "Times_v2_%s_Bars%s", PRESETS[difficulty].name,
+            bars == BarsMaximum ? "Max" : "Base");
+}
 static void LoadBestTimes() {
-    unsigned i; int d; char key[64], sec[40];
-    for (d = 0; d < NUM_PRESETS; ++d) {
-        sprintf(sec, "Times_%s", PRESETS[d].name);
-        for (i = 0; i < NUM_TRACKS; ++i) {
-            TimeKey(TRACK_LVLS[i], key);
-            g_bestTimes[i][d] = GetPrivateProfileIntA(sec, key, 0,
-                                                       TIMES_FILE);
+    char key[64], sec[40];
+    for (int d = 0; d < NUM_PRESETS; ++d) {
+        for (int bars = 0; bars < BarsCount; ++bars) {
+            TimeSection(d, bars, sec);
+            for (int i = 0; i < NUM_TRACKS; ++i) {
+                TimeKey(TRACK_LVLS[i], key);
+                g_bestTimes[i][d][bars] = GetPrivateProfileIntA(sec, key, 0, TIMES_FILE);
+            }
         }
     }
 }
 static int SaveBestTime(int idx, DWORD ms) {
     char key[64], val[16], sec[40];
-    if (idx < 0 || idx >= NUM_TRACKS) return 0;
-    if (g_bestTimes[idx][g_diff] && ms >= g_bestTimes[idx][g_diff])
-        return 0;
-    g_bestTimes[idx][g_diff] = ms;
+    if (idx < 0 || idx >= NUM_TRACKS || g_runBars < 0) return 0;
+    DWORD& best = g_bestTimes[idx][g_diff][g_runBars];
+    if (best && ms >= best) return 0;
+    best = ms;
     TimeKey(TRACK_LVLS[idx], key);
     sprintf(val, "%u", (unsigned)ms);
-    sprintf(sec, "Times_%s", PRESETS[g_diff].name);
-    WritePrivateProfileStringA(sec, key, NULL, TIMES_FILE);
+    TimeSection(g_diff, g_runBars, sec);
     WritePrivateProfileStringA(sec, key, val, TIMES_FILE);
     return 1;
 }
@@ -785,11 +842,10 @@ static void __cdecl HudTick() {
     // Between waves the trigger briefly reports spawned>=target with alive==0
     // before the next batch is emitted -> "done" flickers for 1-2 frames.
     // Require a sustained completion (~0.75s) before owning the slot.
-    static int s_doneStreak = 0;
     bool rawDone = progress.target > 0 && progress.spawned >= progress.target
                 && progress.alive == 0;
-    s_doneStreak = rawDone ? s_doneStreak + 1 : 0;
-    bool done = s_doneStreak >= 45;
+    g_doneStreak = rawDone ? g_doneStreak + 1 : 0;
+    bool done = g_doneStreak >= 45;
     if (done && g_runArmed && !g_runDone) {
         DWORD ms = (DWORD)(g_runAccum * 1000.0f);
         char tb[16];
@@ -967,7 +1023,7 @@ static void __cdecl OnMenuBuilt() {
 // Fill rows only from its epilogue; CallMenu owns selection/stack changes.
 static int g_countSel = 1;      // COUNTS index shown on the cycler (25 default)
 static int g_guns = 0;          // 0 = blades only, 1 = bloodguns too
-static volatile LONG g_chalDirty = 0;  // [Challenge] count/guns need flushing
+static volatile LONG g_chalDirty = 0;  // [Challenge] options need flushing
 
 static void FormatBest(DWORD best, char* tb) {
     if (best) sprintf(tb, "%u'%02u'%02u", best / 60000u,
@@ -989,11 +1045,15 @@ static void BuildChallengeMenu() {
               ModLocalize(g_guns ? "Yes" : "No"));
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
+    _snprintf(lbl, sizeof lbl - 1, "%s: %s", ModLocalize("Challenge Bars"),
+              ModLocalize(g_bars == BarsMaximum ? "Challenge Bars Maximum" : "Challenge Bars Base"));
+    lbl[sizeof lbl - 1] = 0;
+    AddMenuItem(lbl, AC_BARS_CYCLE, 0);
     // One launch row per arena; its best time tracks the selected
-    // count + guns + difficulty combination.
+    // count + guns + difficulty + bars combination.
     for (i = 0; i < (int)NUM_ARENAS; ++i) {
         int ti = TrackIndexOf(ARENAS[i].lvls[g_guns][g_countSel]);
-        FormatBest(ti >= 0 ? g_bestTimes[ti][g_diff] : 0, tb);
+        FormatBest(ti >= 0 ? g_bestTimes[ti][g_diff][g_bars] : 0, tb);
         _snprintf(lbl, sizeof lbl - 1, "%s - %s",
                   ModLocalize(ARENAS[i].name), tb);
         lbl[sizeof lbl - 1] = 0;
@@ -1052,9 +1112,14 @@ static int __cdecl DispatchOurs(int action) {
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
+    if (action == AC_BARS_CYCLE) {
+        g_bars = g_bars == BarsBase ? BarsMaximum : BarsBase;
+        InterlockedExchange(&g_chalDirty, 1);
+        *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
     const char* lvl = NULL;
     int i;
-    g_timeChal = -1;
     i = action - AC_ARENA_BASE;
     if (i >= 0 && i < (int)NUM_ARENAS)
         lvl = ARENAS[i].lvls[g_guns][g_countSel];
@@ -1064,15 +1129,7 @@ static int __cdecl DispatchOurs(int action) {
         e = &EXTRA[i];
     if (!lvl && e) lvl = e->lvl;
     if (!lvl) return -1;
-    g_timeChal = TrackIndexOf(lvl);
     g_challengeSession = IsStandaloneChallengeLevel(lvl);
-    // Starting the same challenge again must also reset its session counter.
-    g_hudLvl[0] = 0;
-    g_hudShown[0] = 0;
-    g_killCount = 0;
-    g_runArmed = 0;
-    g_runDone = 0;
-    g_runAccum = 0.0f;
     // 0x5EF4948 is the picked-level buffer: the state machine (0x569990)
     // stricmp()s it against the chapter name [0x7C2280] and then passes it
     // straight to 0x4F9570 on BOTH branches. 0x706B84 turned out to be a
@@ -1632,6 +1689,8 @@ static void LoadConfig() {
             if (COUNTS[i] == n) { g_countSel = i; break; }
         g_guns = GetPrivateProfileIntA("Challenge", "guns", 0,
                                        ".\\br2mod.ini") ? 1 : 0;
+        g_bars = GetPrivateProfileIntA("Challenge", "maxBars", 0,
+                                       ".\\br2mod.ini") == 1 ? BarsMaximum : BarsBase;
     }
 }
 
@@ -1659,6 +1718,15 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
     PatchCallChecked(0x4F9137,"\xE8\xD4\xE6\xFF\xFF",5,HookChallengeExit);
+    // Both launch and native restart enter this level loop after loading Rayne.
+    PatchCallChecked(0x4F9026,"\xE8\x15\xC6\xFF\xFF",5,HookInitChallengeRun);
+    PatchCallChecked(0x55213B,"\xE8\x00\x39\xF8\xFF",5,HookChallengeBarsRank); // health cap
+    PatchCallChecked(0x55215E,"\xE8\xDD\x38\xF8\xFF",5,HookChallengeBarsRank); // rage cap
+    PatchCallChecked(0x592142,"\xE8\xF9\x38\xF4\xFF",5,HookChallengeBarsRank); // HUD length
+    // A native rank-up refills both pools. Use the same fixed rank on both
+    // sides of the comparison so a challenge cannot inherit a near rank-up.
+    PatchCallChecked(0x4D5E58,"\xE8\xE3\xFB\xFF\xFF",5,HookChallengeBarsRank);
+    PatchCallChecked(0x4D5ECB,"\xE8\x70\xFB\xFF\xFF",5,HookChallengeBarsRank);
     InstallPhotoMode();
     // 0x4CD940 (display setter call) detour removed: unstable, see note above.
     ApplyPreset();
@@ -1717,6 +1785,8 @@ static DWORD WINAPI Worker(LPVOID) {
             WritePrivateProfileStringA("Challenge", "guns", NULL, ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "guns",
                                        g_guns ? "1" : "0", ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "maxBars",
+                                       g_bars == BarsMaximum ? "1" : "0", ".\\br2mod.ini");
         }
     }
 }
