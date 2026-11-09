@@ -23,6 +23,16 @@ Gunsucked).
 - Global **Difficulty** under Options: `Minion | Dhampir | Overlord |
   Unraveller | Custom` — real gameplay scaling; `Custom` reads live
   multipliers from `br2mod.ini`
+- Global **Combat** under Options offers Normal and Enhanced. Enhanced adds
+  parry on Lock-On, hitstop, recovery protection, a hit counter and a style
+  grade. It also adds effects for combo endings and parry follow-ups, combo
+  continuation after a directional evade, and a brief camera and time pulse
+  at the impact of feeding fatalities that use blades, kicks or throws.
+  The feeding effect is disabled during the native time powers.
+- Edit `br2mod_combat.ini` while the game is open. Its `[Enhanced]` settings
+  are reloaded automatically and include a switch for each mechanic.
+  Normal uses the original combat rules. Challenge time records have
+  separate Normal and Enhanced profiles.
 - Global **Appearance/Skin** under Options: `Default` keeps the native /
   Gunsucked outfit behaviour; any other entry forces that skin everywhere
 - In-challenge HUD: localized kill counter `Kills: N/M` and a localized
@@ -117,4 +127,5 @@ editing the ini). Chosen menu values are written back so they persist.
 
 `br2mod_times.ini` stores new records under
 `[Times_v2_<Difficulty>_BarsBase]` and `[Times_v2_<Difficulty>_BarsMax]`.
+Enhanced combat uses the same sections with an `_Enhanced` suffix.
 The previous sections are kept as an archive and excluded from comparisons.

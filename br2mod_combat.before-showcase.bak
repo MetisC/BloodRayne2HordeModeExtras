@@ -1,0 +1,118 @@
+; BloodRayne 2 - Combate Mejorado
+; Guarda este archivo para aplicar los cambios en menos de un segundo.
+; Normal usa las reglas originales. 0/1 desactiva/activa cada opcion booleana.
+; Usa punto decimal. Los valores se ajustan a limites seguros.
+
+[Enhanced]
+
+; Parry. 0 desactiva la mecanica completa.
+parryEnabled=1
+
+; Ventana en ms de juego, escalada con el tiempo bala nativo.
+parryWindowMs=200
+
+; Tope de la ventana en ms reales, incluso con tiempo congelado.
+parryMaxInputMs=1200
+
+; Ms reales tras acertar o agotar la ventana. Las pulsaciones intermedias no rearman.
+parryCooldownMs=240
+
+; Ms reales durante los que se descarta el mismo golpe desviado.
+parryRepeatMs=1400
+
+; Factor minimo del reloj usado para la ventana.
+parryClockFloor=0.25
+
+; Pulso global en ms reales. El retorno a velocidad normal dura parrySlowFadeMs.
+parrySlowHoldMs=300
+parrySlowFadeMs=420
+
+; Multiplicador global y multiplicador adicional solo para el atacante.
+parryWorldRate=0.40
+parryAttackerRate=0.20
+
+; Severidad nativa permitida para el parry.
+parryMinSeverity=1
+parryMaxSeverity=4
+
+; Feedback del parry. La escala y vida se aplican a la instancia de chispas.
+parrySound=1
+parrySpark=1
+parrySparkScale=2.0
+parrySparkMs=1000
+parryFallbackSparkMs=250
+parryShake=4000.0
+parryShakeMs=250
+
+; Hitstop local para Rayne y el enemigo alcanzado. 0 desactiva el pulso.
+hitstopEnabled=1
+
+; Duraciones en ms reales. 0 desactiva ese pulso.
+bladeHitstopMs=32
+kickHitstopMs=48
+heavyHitstopMs=60
+
+; Desde esta severidad se usa el perfil fuerte.
+heavyMinSeverity=4
+
+; Intervalo minimo en ms reales entre pulsos. Los pulsos nunca se acumulan.
+hitstopGapMs=85
+
+; Fraccion de velocidad durante el pulso. 0.01 es casi detenido, 1 es normal.
+hitstopRayneRate=0.08
+hitstopTargetRate=0.05
+
+; Sonidos de impacto adicionales, una vez por ataque.
+bladeSound=1
+kickSound=1
+
+; Intensidad de la camara por tipo de impacto. 0 la desactiva.
+bladeShake=0.0
+kickShake=800.0
+heavyShake=1700.0
+meleeShakeMs=100
+
+; Disparos. El pulso fuerte se reserva para perdigones y explosiones.
+rangedFeedback=1
+rangedGapMs=180
+rangedHeavyHitstopMs=38
+rangedLightShake=300.0
+rangedHeavyShake=1300.0
+rangedShakeMs=120
+
+; Confirmacion audiovisual al enganchar a un enemigo.
+harpoonFeedback=1
+harpoonSound=1
+harpoonShake=1000.0
+harpoonShakeMs=120
+
+; Ms reales para guardar un toque de cuchilla/patada durante el tiron. 0 lo desactiva.
+harpoonComboBufferMs=230
+
+; Proteccion tras recibir dano. Ms reales, sin renovar el plazo con los golpes bloqueados.
+recoveryMs=240
+
+; Ataques cubiertos y severidad maxima. 0 en recoveryMs desactiva toda la proteccion.
+recoveryMelee=1
+recoveryBullets=1
+recoveryMaxSeverity=4
+
+; Contador lateral de impactos confirmados por enemigo y ataque.
+comboEnabled=1
+
+; Tiempo maximo entre golpes consecutivos, en ms reales.
+comboWindowMs=2300
+comboMinHits=2
+comboRanged=1
+
+; Agrupa todos los perdigones de una descarga contra el mismo enemigo.
+comboGroupScatter=1
+comboHarpoonDamage=1
+comboBreakOnDamage=1
+
+; Anclaje derecho y altura del texto como fraccion de la pantalla.
+comboX=0.95
+comboY=0.40
+
+; 1 guarda parry, hitstop, proteccion, arpon y combo en br2mod_parry.log.
+trace=1

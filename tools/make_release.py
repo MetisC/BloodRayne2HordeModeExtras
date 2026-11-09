@@ -34,23 +34,35 @@ main menu (Mansion Battle / Horde Mode, 15-250 enemies, optional guns,
 best times), a global Difficulty preset selector under Options
 (including a Custom preset driven by br2mod.ini), a global Skin
 selector, and localized mod strings for all six game languages.
-Campaign, Extras and stock files are untouched.
+Challenge runs offer Base or Maximum health and rage capacity.
+Photo Mode is available from Pause or via F12 / L3+R3 in gameplay.
+Enhanced combat adds a timed parry and follow-up, hitstop, recovery
+protection, a combo counter, style ranks from D to V, and cinematic
+effects for feeding executions and dismemberment.
+In Enhanced challenges, best time and peak style are separate records.
+Normal challenges track best time.
 
 INSTALL
 -------
 1. Extract this zip into your game folder (next to rayne2.exe):
      - dinput8.dll
      - br2mod.ini
+     - br2mod_combat.ini
      - world\\  (whole folder)
 2. If you already have a dinput8.dll (another proxy mod), back it up
    first - only one dinput8 proxy can be loaded.
-3. Play. The Challenge Mode entry is on the main menu.
+3. If upgrading, keep br2mod.ini to retain your selections. The new
+   br2mod_combat.ini contains the current defaults. Reapply custom
+   combat settings there if needed.
+4. Play. The Challenge Mode entry is on the main menu.
+   In Options, set Combat to Enhanced to use the combat changes.
+   Save edits to br2mod_combat.ini to tune them while the game runs.
 
 UNINSTALL
 ---------
 Delete dinput8.dll and the files this zip added under world\\.
 Your save games and POD archives are never touched. br2mod_times.ini
-(best times) may be deleted to reset records.
+(challenge records) may be deleted to reset them.
 
 QUE ES
 ------
@@ -59,23 +71,35 @@ principal (Batalla en la Mansion / Modo Horda, 15-250 enemigos, armas
 opcionales, mejores tiempos), un selector global de Dificultad en
 Opciones (incluido un preset Custom en br2mod.ini), un selector global
 de Skin, y cadenas del mod traducidas a los seis idiomas del juego.
-La campana, los Extras y los ficheros originales quedan intactos.
+En Desafio puedes elegir capacidad de vida y furia Base o Maxima.
+Modo Foto se abre desde Pausa o con F12 / L3+R3 en partida.
+Combate Mejorado anade parry y replica, hitstop, proteccion tras
+recibir dano, contador de combos, rangos de estilo de D a V y
+efectos de camara en ejecuciones y mutilaciones.
+En Desafio con Mejorado hay records separados de tiempo y estilo.
+En Normal se guarda el mejor tiempo.
 
 INSTALACION
 -----------
 1. Descomprime este zip en la carpeta del juego (junto a rayne2.exe):
      - dinput8.dll
      - br2mod.ini
+     - br2mod_combat.ini
      - world\\  (carpeta completa)
 2. Si ya tienes un dinput8.dll (otro mod proxy), haz copia antes:
    solo puede cargarse un proxy dinput8.
-3. A jugar. El modo Desafio esta en el menu principal.
+3. Si actualizas, conserva br2mod.ini para mantener tus selecciones.
+   El nuevo br2mod_combat.ini incluye los valores actuales. Vuelve
+   a aplicar ahi tus ajustes de combate personalizados si los usas.
+4. A jugar. El modo Desafio esta en el menu principal.
+   En Opciones, selecciona Combate Mejorado para activar los cambios.
+   Guarda br2mod_combat.ini para ajustarlos con el juego abierto.
 
 DESINSTALAR
 -----------
 Borra dinput8.dll y los ficheros que el zip anadio en world\\.
 Las partidas guardadas y los POD originales nunca se tocan.
-br2mod_times.ini (mejores tiempos) puede borrarse para reiniciar records.
+br2mod_times.ini puede borrarse para reiniciar los records de Desafio.
 """
 
 
@@ -88,8 +112,13 @@ def main():
 
     game = a.game
     items = []  # (src, arcname)
-    items.append((os.path.join(ROOT, "dinput8.dll"), "dinput8.dll"))
+    dll = os.path.join(ROOT, "dinput8.dll")
+    with open(dll, "rb") as binary:
+        if b"BR2-COMBAT-TEST" in binary.read():
+            sys.exit("Refusing to package a combat test DLL. Run build.bat without arguments.")
+    items.append((dll, "dinput8.dll"))
     items.append((os.path.join(ROOT, "br2mod.ini"), "br2mod.ini"))
+    items.append((os.path.join(ROOT, "br2mod_combat.ini"), "br2mod_combat.ini"))
 
     world = os.path.join(game, "world")
     for base in GENERATED + RETITLED + SCENE:

@@ -27,6 +27,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <float.h>
+#include <limits.h>
+#include <stdlib.h>
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
 #include <xinput.h>
@@ -84,6 +87,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 // Action codes >= 0x110: natives stop at 0x10C, zero collisions.
 #define AC_CHALLENGE_MENU 0x110
 #define AC_DIFFICULTY     0x111
+#define AC_COMBAT         0x112
 #define AC_COUNT_CYCLE    0x113    // cycle enemy-count selection
 #define AC_GUNS_CYCLE     0x114    // cycle weapons on/off for the run
 #define AC_BARS_CYCLE     0x115
@@ -106,6 +110,10 @@ static const Preset PRESETS[] = {
 #define DIFF_CUSTOM  4
 static int g_diff = 1;
 static volatile LONG g_presetDirty = 0;
+enum CombatMode { CombatNormal, CombatEnhanced, CombatCount };
+static const char* const COMBAT_NAMES[] = { "Normal", "Enhanced" };
+static int g_combat = CombatNormal;
+static volatile LONG g_combatDirty = 0;
 static char g_pendingChain[64];
 static int g_legacyGuards = 0;
 static int g_chainTrace = 0;
@@ -411,6 +419,7 @@ static const ModLoc MODL[] = {
  {"Back to Main Menu", {"Back to Main Menu","Retour au menu principal","Torna al menu principale","Volver al men\xFA principal","Zur\xFC""ck zum Hauptmen\xFC",0,"\xCD\xE0\xE7\xE0\xE4 \xE2 \xE3\xEB\xE0\xE2\xED\xEE\xE5 \xEC\xE5\xED\xFE"}},
  {"Best Time", {"Best Time","Meilleur temps","Miglior tempo","Mejor tiempo","Bestzeit",0,"\xCB\xF3\xF7\xF8\xE5\xE5 \xE2\xF0\xE5\xEC\xFF"}},
  {"Time", {"Time","Temps","Tempo","Tiempo","Zeit",0,"\xC2\xF0\xE5\xEC\xFF"}},
+ {"Peak Style", {"Peak style","Meilleur style","Stile max","Mejor estilo","Bester Stil",0,"\xCB\xF3\xF7\xF8\xE8\xE9 \xF1\xF2\xE8\xEB\xFC"}},
  {"New Record!", {"New Record!","Nouveau record !","Nuovo record!","\xA1Nuevo r\xE9""cord!","Neuer Rekord!",0,"\xCD\xEE\xE2\xFB\xE9 \xF0\xE5\xEA\xEE\xF0\xE4!"}},
  {"Story Mode", {"Story Mode","Mode histoire","Modalit\xE0 storia","Modo historia","Story-Modus",0,"\xD1\xFE\xE6\xE5\xF2\xED\xFB\xE9 \xF0\xE5\xE6\xE8\xEC"}},
  {"Combat Mode", {"Combat Mode","Mode combat","Modalit\xE0 combattimento","Modo combate","Kampfmodus",0,"\xC1\xEE\xE5\xE2\xEE\xE9 \xF0\xE5\xE6\xE8\xEC"}},
@@ -418,6 +427,9 @@ static const ModLoc MODL[] = {
  {"Suicide Run", {"Suicide Run","Course suicide","Corsa suicida","Carrera suicida","Selbstmord-Lauf",0,"\xD1\xE0\xEC\xEE\xF3\xE1\xE8\xE9\xF1\xF2\xE2\xE5\xED\xED\xFB\xE9 \xE7\xE0\xE1\xE5\xE3"}},
  {"Testing Level", {"Testing Level","Niveau de test","Livello di test","Nivel de pruebas","Test-Level",0,"\xD2\xE5\xF1\xF2\xEE\xE2\xFB\xE9 \xF3\xF0\xEE\xE2\xE5\xED\xFC"}},
  {"Difficulty", {"Difficulty","Difficult\xE9","Difficolt\xE0","Dificultad","Schwierigkeit",0,"\xD1\xEB\xEE\xE6\xED\xEE\xF1\xF2\xFC"}},
+ {"Combat", {"Combat","Combat","Combattimento","Combate","Kampf",0,"\xC1\xEE\xE9"}},
+ {"Combat Normal", {"Normal","Normal","Normale","Normal","Normal",0,"\xCE\xE1\xFB\xF7\xED\xFB\xE9"}},
+ {"Combat Enhanced", {"Enhanced","Am\xE9lior\xE9","Migliorato","Mejorado","Erweitert",0,"\xD3\xEB\xF3\xF7\xF8\xE5\xED\xED\xFB\xE9"}},
  {"Unraveller", {"Unraveller","Le Corrupteur","Unraveller","Desmembrador","Filetierer",0,"\xC2\xEE\xED\xFE\xEA"}},
  {"Custom", {"Custom","Personnalis\xE9","Personalizzato","Personalizado","Benutzerdefiniert",0,"\xCF\xEE\xEB\xFC\xE7\xEE\xE2\xE0\xF2\xE5\xEB\xFC\xF1\xEA\xE8\xE9"}},
  {"Kills", {"Kills","Victimes","Uccisioni","Bajas","Absch\xFCsse",0,"\xD3\xE1\xE8\xE9\xF1\xF2\xE2"}},
@@ -461,16 +473,21 @@ static const char* ModLocalize(const char* key) {
 static int  g_killCount;
 static char g_hudLvl[64];
 static char g_hudBuf[64];
-static char g_hudShown[96];
+static char g_hudShown[160];
 static char g_killsLbl[40];
 static char g_doneLbl[48];
 static char g_timeLbl[40];
 static char g_recLbl[48];
-static char g_doneBuf[96];
+static char g_doneBuf[160];
 
 enum ChallengeBars { BarsBase, BarsMaximum, BarsCount };
 static int g_bars = BarsBase;
 static int g_runBars = -1;      // latched on native level load/restart
+static int g_runCombat = CombatNormal;
+static int g_runDifficulty;
+static int g_runStylePeak;
+static bool g_runCombatChanged;
+static unsigned long long g_runCombatProfile;
 static void* g_runSituation;
 
 // ---- best times: .\br2mod_times.ini [Times_v2_<Preset>_Bars<Base|Max>] ----
@@ -483,8 +500,10 @@ static int   g_timeChal = -1;    // CHALLENGE index whose run is being timed
 static float g_runAccum;         // accumulated run seconds (game time)
 static int   g_runArmed;         // first enemy emitted -> clock counts
 static int   g_runDone;          // completion latched -> no more counting
-static int   g_newRecord;        // last completion beat the stored best
 static int   g_doneStreak;
+
+#include "parry.inl"
+#include "enhanced_combat.inl"
 
 static int ChallengeBarsRank(int bars) {
     return bars == BarsMaximum ? 10 : 0;
@@ -492,7 +511,16 @@ static int ChallengeBarsRank(int bars) {
 
 static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
     ((void (__thiscall*)(void*, int))0x4F5640)(game, flag);
+    ResetParry();
+    ResetCombatIncoming();
     g_runBars = -1;
+    SampleEnhancedSettings();
+    g_runCombatProfile = g_combatProfile;
+    g_runCombat = g_combat;
+    g_runDifficulty = g_diff;
+    g_runStylePeak = 0;
+    g_runCombatChanged = false;
+    g_parryCooling = false;
     g_runSituation = NULL;
     g_timeChal = TrackIndexOf((const char*)G_CURRENT_LEVEL);
     g_hudLvl[0] = 0;
@@ -544,15 +572,19 @@ static void TimeKey(const char* lvl, char* out) {
         out[n] = (char)tolower((unsigned char)base[n]);
     out[n] = 0;
 }
-static void TimeSection(int difficulty, int bars, char* out) {
-    sprintf(out, "Times_v2_%s_Bars%s", PRESETS[difficulty].name,
-            bars == BarsMaximum ? "Max" : "Base");
+static void TimeSection(int difficulty, int bars, int combat, unsigned long long profile,
+                        char (&out)[96]) {
+    const char* capacity = bars == BarsMaximum ? "Max" : "Base";
+    if (combat == CombatEnhanced)
+        sprintf_s(out, "Times_v4_%s_Bars%s_Enhanced_%016llX", PRESETS[difficulty].name, capacity, profile);
+    else
+        sprintf_s(out, "Times_v2_%s_Bars%s", PRESETS[difficulty].name, capacity);
 }
 static void LoadBestTimes() {
-    char key[64], sec[40];
+    char key[64], sec[96];
     for (int d = 0; d < NUM_PRESETS; ++d) {
         for (int bars = 0; bars < BarsCount; ++bars) {
-            TimeSection(d, bars, sec);
+            TimeSection(d, bars, CombatNormal, 0, sec);
             for (int i = 0; i < NUM_TRACKS; ++i) {
                 TimeKey(TRACK_LVLS[i], key);
                 g_bestTimes[i][d][bars] = GetPrivateProfileIntA(sec, key, 0, TIMES_FILE);
@@ -560,17 +592,69 @@ static void LoadBestTimes() {
         }
     }
 }
-static int SaveBestTime(int idx, DWORD ms) {
-    char key[64], val[16], sec[40];
-    if (idx < 0 || idx >= NUM_TRACKS || g_runBars < 0) return 0;
-    DWORD& best = g_bestTimes[idx][g_diff][g_runBars];
-    if (best && ms >= best) return 0;
-    best = ms;
+struct ChallengeRecords {
+    DWORD bestTime;
+    int styleAtBestTime, bestStyle;
+    DWORD timeAtBestStyle;
+};
+enum ChallengeRecordFlags { RecordTime = 1, RecordStyle = 2 };
+
+static ChallengeRecords ReadChallengeRecords(int idx, int difficulty, int bars, int combat,
+                                             unsigned long long profile) {
+    if (idx < 0 || idx >= NUM_TRACKS) return {};
+    if (combat == CombatNormal) return {g_bestTimes[idx][difficulty][bars]};
+    char key[64], sec[96];
     TimeKey(TRACK_LVLS[idx], key);
-    sprintf(val, "%u", (unsigned)ms);
-    TimeSection(g_diff, g_runBars, sec);
-    WritePrivateProfileStringA(sec, key, val, TIMES_FILE);
-    return 1;
+    TimeSection(difficulty, bars, combat, profile, sec);
+    char value[64];
+    GetPrivateProfileStringA(sec, key, "", value, sizeof value, TIMES_FILE);
+    ChallengeRecords records{};
+    if (sscanf_s(value, "%lu,%d,%d,%lu", &records.bestTime, &records.styleAtBestTime,
+                 &records.bestStyle, &records.timeAtBestStyle) != 4 ||
+        records.styleAtBestTime < 0 || records.styleAtBestTime > 999999 ||
+        records.bestStyle < records.styleAtBestTime || records.bestStyle > 999999 ||
+        (records.bestStyle && !records.timeAtBestStyle)) return {};
+    return records;
+}
+
+static int SaveChallengeRecords(int idx, DWORD ms, int style) {
+    if (idx < 0 || idx >= NUM_TRACKS || g_runBars < 0 || g_runCombatChanged) {
+        if (g_runCombatChanged) LogParry("record-profile-changed", ms);
+        return 0;
+    }
+    if (!ms) return 0;
+    const bool enhanced = g_runCombat == CombatEnhanced;
+    const int difficulty = enhanced ? g_runDifficulty : g_diff;
+    auto records = ReadChallengeRecords(idx, difficulty, g_runBars, g_runCombat, g_runCombatProfile);
+    int flags = 0;
+    if (!records.bestTime || ms < records.bestTime || (ms == records.bestTime && style > records.styleAtBestTime)) {
+        records.bestTime = ms;
+        records.styleAtBestTime = style;
+        flags |= RecordTime;
+    }
+    if (style > 0 && (style > records.bestStyle ||
+        (style == records.bestStyle && ms < records.timeAtBestStyle))) {
+        records.bestStyle = style;
+        records.timeAtBestStyle = ms;
+        flags |= RecordStyle;
+    }
+    if (!flags) return 0;
+    char key[64], val[64], sec[96];
+    TimeKey(TRACK_LVLS[idx], key);
+    if (enhanced)
+        sprintf_s(val, "%lu,%d,%d,%lu", records.bestTime, records.styleAtBestTime,
+                  records.bestStyle, records.timeAtBestStyle);
+    else
+        sprintf_s(val, "%lu", records.bestTime);
+    TimeSection(difficulty, g_runBars, g_runCombat, g_runCombatProfile, sec);
+    if (!WritePrivateProfileStringA(sec, key, val, TIMES_FILE)) {
+        LogParry("record-write-failed", ms, flags, 0, style);
+        return 0;
+    }
+    if (!enhanced) g_bestTimes[idx][difficulty][g_runBars] = ms;
+    LogParry("record-saved", ms, flags, 0, style, 0, 0, NULL, NULL, 0,
+             (float)records.bestTime, (float)records.bestStyle, (float)records.timeAtBestStyle);
+    return flags;
 }
 
 static void TrackHudLevel() {
@@ -786,6 +870,7 @@ static void __cdecl HudTick() {
     const char* lvl = (const char*)0x5E33258;
     int menuOpen = *(DWORD*)0x5EF4BF8 != 0;   // any menu open -> not in gameplay
     DWORD gso = *(DWORD*)0x7C07F8;
+    if (gso && !menuOpen) DrawCombatCombo((BYTE*)gso);
     // Game-time clock: the engine's own scaled world delta (slow-mo factor
     // already applied by the game; pauses/menus are excluded by the gate).
     if (g_runArmed && !g_runDone && !menuOpen && gso &&
@@ -849,14 +934,21 @@ static void __cdecl HudTick() {
     if (done && g_runArmed && !g_runDone) {
         DWORD ms = (DWORD)(g_runAccum * 1000.0f);
         char tb[16];
+        SampleEnhancedSettings();
         g_runDone = 1;
-        g_newRecord = SaveBestTime(g_timeChal, ms);
+        const bool showStyle = g_runCombat == CombatEnhanced && g_enhanced.styleEnabled;
+        const int style = showStyle ? g_runStylePeak : 0;
+        const int records = SaveChallengeRecords(g_timeChal, ms, style);
         FormatTime(ms, tb);
-        if (g_newRecord)
-            sprintf(g_doneBuf, "%s - %s: %s - %s",
-                    g_doneLbl, g_timeLbl, tb, g_recLbl);
+        LogParry("challenge-result", ms, records, 0, style, 0, 0, NULL, NULL, 0,
+                 g_runCombatChanged ? 1.0f : 0.0f);
+        if (showStyle)
+            sprintf_s(g_doneBuf, "%s - %s: %s - %s: %d (%s)%s%s", g_doneLbl, g_timeLbl, tb,
+                      ModLocalize("Peak Style"), style, StyleGrade(style), records ? " - " : "",
+                      records ? g_recLbl : "");
         else
-            sprintf(g_doneBuf, "%s - %s: %s", g_doneLbl, g_timeLbl, tb);
+            sprintf_s(g_doneBuf, "%s - %s: %s%s%s", g_doneLbl, g_timeLbl, tb,
+                      records ? " - " : "", records ? g_recLbl : "");
     }
     if (done && !g_runDone) g_doneBuf[0] = 0; // not armed this run
     // Yield the slot to script text: if the slot holds something we did not
@@ -961,6 +1053,10 @@ static void BuildChallengeMenu();
 static void __cdecl OnMenuBuilt() {
     TraceGlobals("menu-before-injection");
     int id = *(int*)G_MENU_STATE;
+    if (id) {
+        SampleEnhancedSettings();
+        ResetParry();
+    }
     unsigned i;
     switch (id) {
     case MENU_PAUSE:
@@ -987,6 +1083,10 @@ static void __cdecl OnMenuBuilt() {
             AddMenuItem(ModLocalize(EXTRA[i].title), AC_EXTRA_BASE + i, EXTRA[i].lvl);
         break;
     case MENU_OPTIONS: {
+        static char combat[64];
+        sprintf(combat, "%s: %s", ModLocalize("Combat"),
+                ModLocalize(g_combat == CombatEnhanced ? "Combat Enhanced" : "Combat Normal"));
+        AddMenuItem(combat, AC_COMBAT, 0);
         static char buf[64];
         // "Dhampir" is a proper name: show it verbatim in every language
         // (the native ES string is "Dhampir:" which would read wrong here).
@@ -1049,13 +1149,25 @@ static void BuildChallengeMenu() {
               ModLocalize(g_bars == BarsMaximum ? "Challenge Bars Maximum" : "Challenge Bars Base"));
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_BARS_CYCLE, 0);
-    // One launch row per arena; its best time tracks the selected
-    // count + guns + difficulty + bars combination.
+    // Time first, then style. When they come from different runs, show the
+    // paired result in parentheses next to each independent record.
     for (i = 0; i < (int)NUM_ARENAS; ++i) {
         int ti = TrackIndexOf(ARENAS[i].lvls[g_guns][g_countSel]);
-        FormatBest(ti >= 0 ? g_bestTimes[ti][g_diff][g_bars] : 0, tb);
-        _snprintf(lbl, sizeof lbl - 1, "%s - %s",
-                  ModLocalize(ARENAS[i].name), tb);
+        const auto records = ReadChallengeRecords(ti, g_diff, g_bars, g_combat, g_combatProfile);
+        const char* name = ModLocalize(ARENAS[i].name);
+        FormatBest(records.bestTime, tb);
+        if (g_combat != CombatEnhanced || !g_enhanced.styleEnabled) {
+            _snprintf(lbl, sizeof lbl - 1, "%s - %s", name, tb);
+        } else if (!records.bestStyle) {
+            _snprintf(lbl, sizeof lbl - 1, "%s - %s / --", name, tb);
+        } else if (records.styleAtBestTime == records.bestStyle && records.bestTime == records.timeAtBestStyle) {
+            _snprintf(lbl, sizeof lbl - 1, "%s - %s / %d(%s)", name, tb, records.bestStyle, StyleGrade(records.bestStyle));
+        } else {
+            char styleTime[16];
+            FormatBest(records.timeAtBestStyle, styleTime);
+            _snprintf(lbl, sizeof lbl - 1, "%s - %s(%d) / %d(%s) [%s]", name, tb, records.styleAtBestTime,
+                      records.bestStyle, StyleGrade(records.bestStyle), styleTime);
+        }
         lbl[sizeof lbl - 1] = 0;
         AddMenuItem(lbl, AC_ARENA_BASE + i, 0);
     }
@@ -1073,7 +1185,15 @@ static int __cdecl DispatchOurs(int action) {
     }
     if (action == AC_CHALLENGE_MENU) { CallMenu(MENU_CHALLENGE); return 0; }
     if (action == AC_BACK)           { MenuBack();              return 0; }
+    if (action == AC_COMBAT) {
+        g_combat = g_combat == CombatNormal ? CombatEnhanced : CombatNormal;
+        if (g_runBars >= 0) g_runCombatChanged = true;
+        InterlockedExchange(&g_combatDirty, 1);
+        *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
     if (action == AC_DIFFICULTY) {
+        if (g_runBars >= 0 && g_runCombat == CombatEnhanced) g_runCombatChanged = true;
         g_diff = (g_diff + 1) % NUM_PRESETS;
         ApplyPreset();
         // Persist lazily: WritePrivateProfileStringA rewrites the whole INI on
@@ -1571,6 +1691,21 @@ static void PatchChecked(DWORD site,const char* expected,int length,void* target
     PatchSite((void*)site,length,target);
 }
 
+static void EnableChallengeCancel() {
+    // Native Esc/B dispatch indexes this table by menu ID minus one.
+    // Slot 0x3D's original case is inert unless a separate flag is set.
+    // Case 8 goes straight to MenuBack, as used by stock submenus.
+    BYTE* entry = (BYTE*)(0x5691DC + MENU_CHALLENGE - 1);
+    DWORD old;
+    if (*entry != 0x0A ||
+        !VirtualProtect(entry, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        Trace("PATCH failed: Challenge cancel entry");
+        return;
+    }
+    *entry = 0x08;
+    VirtualProtect(entry, 1, old, &old);
+}
+
 // `call rel32` detour: pushes the site return so ONE handler can serve many
 // sites sharing the same stolen instruction. Handler must replay it and ret.
 static void PatchCallChecked(DWORD site,const char* expected,int length,void* target) {
@@ -1680,6 +1815,8 @@ static void LoadConfig() {
                              buf, sizeof buf, ".\\br2mod.ini");
     for (int i = 0; i < NUM_PRESETS; ++i)
         if (!_stricmp(buf, PRESETS[i].name)) g_diff = i;
+    GetPrivateProfileStringA("Combat", "mode", "Normal", buf, sizeof buf, ".\\br2mod.ini");
+    g_combat = !_stricmp(buf, "Enhanced") ? CombatEnhanced : CombatNormal;
     GetPrivateProfileStringA("Appearance", "skin", "default",
                              g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
     {   // remembered challenge options
@@ -1697,6 +1834,7 @@ static void LoadConfig() {
 static DWORD WINAPI Worker(LPVOID) {
     InitTrace();
     LoadConfig();
+    ReadEnhancedSettings();
     BuildTrackList();
     LoadBestTimes();
     EnableLooseFilePriority();       // polls until handlers installed
@@ -1715,9 +1853,50 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x56A170,"\x55\x8b\xec\x8b\x45\x08",6,HookGetBonePos);
     PatchSite((void*)0x561E1A, 6, HookA);
     PatchSite((void*)0x5670E1, 12, HookB);
+    EnableChallengeCancel();
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
     PatchCallChecked(0x4F9137,"\xE8\xD4\xE6\xFF\xFF",5,HookChallengeExit);
+    PatchCallChecked(0x4F8DB3,"\xE8\x68\xFA\xFF\xFF",5,HookParryInput);
+    PatchCallChecked(0x4F44FF,"\xE8\x7C\x52\x15\x00",5,HookParryWorldFactor);
+    PatchCallChecked(0x6498D8,"\xE8\x63\xFD\xFF\xFF",5,HookParryActorFactor);
+    PatchChecked(0x551206,"\x53\x8B\xCE\xE8\xE2\x7A\x11\x00",8,HookParryContact);
+    // Native character update calls that advance the actor using its +0x590 channel.
+    PatchCallChecked(0x479DF0,"\xE8\xEB\xFA\x1C\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x4823CF,"\xE8\x0C\x75\x1C\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x4AEF0F,"\xE8\xCC\xA9\x19\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x4BA679,"\xE8\x62\xF2\x18\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x4C5C79,"\xE8\x62\x3C\x18\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x4DCCFE,"\xE8\xDD\xCB\x16\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x528C9F,"\xE8\x3C\x0C\x12\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x5344CA,"\xE8\x11\x54\x11\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x53CA8C,"\xE8\x4F\xCE\x10\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x54892D,"\xE8\xAE\x0F\x10\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x55212D,"\xE8\xAE\x77\x0F\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x5C7959,"\xE8\x82\x1F\x08\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x5D0977,"\xE8\x64\x8F\x07\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x6159DF,"\xE8\xFC\x3E\x03\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x617BAA,"\xE8\x31\x1D\x03\x00",5,HookEnhancedActorUpdate);
+    PatchCallChecked(0x64116D,"\xE8\x6E\x87\x00\x00",5,HookEnhancedActorUpdate);
+    PatchChecked(0x55123C,"\x81\x3B\x87\x00\x00\x00\x0F\x84\xE8\x08\x00\x00",12,HookCombatRecoveryGate);
+    PatchChecked(0x5515E5,"\x6A\x00\x53\x8B\xCE\xE8\xC1\x1D\xEF\xFF",10,HookCombatDamageApplied);
+    PatchChecked(0x669350,"\x55\x8B\xEC\xA1\x20\xCF\x7D\x00",8,HookCombatOutgoing);
+    PatchChecked(0x662948,"\x89\xB3\x74\x83\x00\x00",6,HookCombatHarpoonPrimary);
+    PatchChecked(0x662B4A,"\x89\xBB\x74\x83\x00\x00",6,HookCombatHarpoonSecondary);
+    PatchCallChecked(0x5868E4,"\xE8\x57\xCD\xF5\xFF",5,HookScatterProjectile);
+    PatchCallChecked(0x586607,"\xE8\x84\xF1\xE7\xFF",5,HookGunMessageInit);
+    PatchCallChecked(0x5508C0,"\xE8\x0B\xBB\xFF\xFF",5,HookDodgeBlade);
+    PatchCallChecked(0x5508B7,"\xE8\x74\xBE\xFF\xFF",5,HookDodgeKick);
+    PatchCallChecked(0x672A7B,"\xE8\xA0\x51\xF9\xFF",5,HookCombatAnimationStep); // Rayne
+    PatchCallChecked(0x5BB9DE,"\xE8\x3D\xC2\x04\x00",5,HookCombatAnimationStep); // punk controller
+    PatchCallChecked(0x5CD9DA,"\xE8\x41\xA2\x03\x00",5,HookCombatAnimationStep); // alternate controller
+    PatchCallChecked(0x450BF6,"\xE8\xB5\xBA\xFF\xFF",5,HookCinematicDetach);
+    PatchCallChecked(0x5B3E4D,"\x8B\x07\x8B\x50\x3C\x8D\x8D\x78\xFF\xFF\xFF\x51\x8B\xCF\xFF\xD2",16,HookCinematicCollision);
+    PatchCallChecked(0x66D1AC,"\x8B\x42\x3C\x57\xFF\xD0",6,HookCinematicKick);
+    PatchCallChecked(0x4089C6,"\x8B\x50\x3C\x56\xFF\xD2",6,HookCinematicRay);
+    PatchCallChecked(0x4098D8,"\x8B\x52\x3C\x89\x85\x48\xFB\xFF\xFF\x8D\x85\xEC\xFA\xFF\xFF\x50\x8B\xCB\xFF\xD2",20,HookCinematicWeapon);
+    PatchCallChecked(0x662851,"\x8B\x52\x3C\x8D\x85\xC4\xF6\xFF\xFF\x50\xFF\xD2",12,HookCinematicHarpoon);
+    PatchCallChecked(0x4A219B,"\xE8\xF0\x61\x11\x00",5,HookCombatFxStart);
     // Both launch and native restart enter this level loop after loading Rayne.
     PatchCallChecked(0x4F9026,"\xE8\x15\xC6\xFF\xFF",5,HookInitChallengeRun);
     PatchCallChecked(0x55213B,"\xE8\x00\x39\xF8\xFF",5,HookChallengeBarsRank); // health cap
@@ -1765,12 +1944,19 @@ static DWORD WINAPI Worker(LPVOID) {
     // Lazy INI writer: keeps all br2mod.ini disk I/O off the game thread.
     for (;;) {
         Sleep(500);
+        FlushParryLog();
+        ReadEnhancedSettings();
         // WritePrivateProfileStringA leaves stale NUL padding when the new
         // value is shorter than the old one: delete the key first.
         if (InterlockedExchange(&g_presetDirty, 0)) {
             WritePrivateProfileStringA("Difficulty", "preset", NULL, ".\\br2mod.ini");
             WritePrivateProfileStringA("Difficulty", "preset",
                                        PRESETS[g_diff].name, ".\\br2mod.ini");
+        }
+        if (InterlockedExchange(&g_combatDirty, 0)) {
+            WritePrivateProfileStringA("Combat", "mode", NULL, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Combat", "mode",
+                                       COMBAT_NAMES[g_combat], ".\\br2mod.ini");
         }
         if (InterlockedExchange(&g_skinDirty, 0)) {
             WritePrivateProfileStringA("Appearance", "skin", NULL, ".\\br2mod.ini");

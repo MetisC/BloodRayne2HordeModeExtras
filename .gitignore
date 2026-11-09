@@ -7,3 +7,9 @@ br2mod.exp
 *.pdb
 *.log
 validation.txt
+dinput8-combat-test.dll
+dinput8-combat-test.map
+br2mod-combat-test.obj
+br2mod-combat-test.lib
+br2mod-combat-test.exp
+validation-combat-test.txt

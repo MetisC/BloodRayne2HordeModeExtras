@@ -142,6 +142,7 @@ void SetPhotoAudioPause(bool paused) {
 }
 
 void BeginPhoto(DWORD now, int padSlot, bool fromGameplay) {
+    ResetParry();
     auto* view = PhotoGlobal<BYTE*>(MainPhotoView);
     g_photoHero = PhotoGlobal<DWORD>(0x7DCD68);
     g_photoSituation = PhotoGlobal<DWORD>(0x7C2478);
@@ -256,6 +257,10 @@ void __stdcall PhotoSubmitCamera(const PhotoVec* pos, const PhotoVec* angles,
         g_photoLastView = view;
         g_photoLastHero = PhotoGlobal<DWORD>(0x7DCD68);
         g_photoNativePose = {*pos, *angles, fov};
+        PhotoVec framedAngles = *angles;
+        fov = FeedExecutionCameraFov(ShowcaseCameraFov(fov), framedAngles.x);
+        original(pos, &framedAngles, fov, listener);
+        return;
     }
     original(pos, angles, fov, listener);
 }
