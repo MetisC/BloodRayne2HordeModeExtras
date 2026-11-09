@@ -8,7 +8,9 @@ namespace {
 constexpr unsigned CharacterTimeChannelOffset = 0x590;
 bool g_enhancedGameplay;
 void ResetCombatEffects();
-void TickCombat(BYTE* rayne, DWORD now);
+void TickCombat(BYTE* rayne, DWORD now, float gameDeltaMs);
+bool TickFeedEscape(BYTE* rayne, bool pressed, float gameDeltaMs);
+bool SuppressFeedEscapeHit(BYTE* rayne, BYTE* hit);
 float LocalHitstopRate(void* channel, float delta);
 float HitstopWorldRate(DWORD now);
 float ShowcaseWorldRate(DWORD now);
@@ -308,7 +310,9 @@ void __fastcall HookParryInput(BYTE* game, void*) {
     g_enhancedGameplay = true;
     const DWORD now = GetTickCount();
     TraceCombatFrame();
-    TickCombat(rayne, now);
+    // The native world delta already includes time powers and global hitstop.
+    const float gameDeltaMs = max(0.0f, *(const float*)(game + 0x3D8) * 1000.0f);
+    TickCombat(rayne, now, gameDeltaMs);
     // Native state 1 is held. Ignored presses never re-arm on their own.
     const bool held = *(int*)(rayne + 0x3A70) == 1;
     const bool pressed = held && !g_parryHeld;
@@ -326,7 +330,7 @@ void __fastcall HookParryInput(BYTE* game, void*) {
     }
     if (g_parryCooling && now - g_parryCooldownAt >= (DWORD)g_enhanced.parryCooldownMs)
         g_parryCooling = false;
-    if (pressed && g_enhanced.parryEnabled) {
+    if (!TickFeedEscape(rayne, pressed, gameDeltaMs) && pressed && g_enhanced.parryEnabled) {
         if (!g_parryArmed && !g_parryCooling && g_enhanced.parryWindowMs) {
             g_parryPressedAt = now;
             g_parryAgeSeconds = 0.0f;
@@ -427,8 +431,10 @@ void ParryFeedback(BYTE* rayne, const BYTE* hit) {
         SpawnCombatFx(*(const char**)0x754FD0, point, normal, 1.0f, g_enhanced.parryFallbackSparkMs);
 }
 
-int __cdecl TryParry(BYTE* rayne, const BYTE* hit) {
-    if (*(BYTE**)0x7DCD68 != rayne || !EnhancedCombatActive()) return 0;
+int __cdecl TryParry(BYTE* rayne, BYTE* hit) {
+    if (*(BYTE**)0x7DCD68 != rayne || !EnhancedCombatActive() ||
+        !CombatEffectEnabled(EffectParry) || !g_enhanced.parryEnabled) return 0;
+    if (SuppressFeedEscapeHit(rayne, hit)) return 1;
 
     const DWORD now = GetTickCount();
     const DWORD age = now - g_parryPressedAt;
@@ -446,7 +452,6 @@ int __cdecl TryParry(BYTE* rayne, const BYTE* hit) {
                  age, kind, severity, state, 0, hitId, attacker, rayne);
         return repeat ? 1 : 0;
     }
-    if (!g_enhanced.parryEnabled) return 0;
     const DWORD vtable = CombatTraceEnabled() && attacker ? ReadWord((DWORD)attacker) : 0;
     const char* rejected = NULL;
     if (!melee)

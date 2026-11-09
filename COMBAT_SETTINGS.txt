@@ -1,0 +1,307 @@
+BloodRayne 2 - Enhanced Combat Settings
+=======================================
+
+QUICK SETUP
+In Options, set Combat to Enhanced and open Combat Effects.
+Turn off Finisher Cinematics and Impact Pause to remove extra finish
+slowdown, zoom and hitstop while keeping the combat mechanics enabled.
+
+Finisher Cinematics covers combo finishers, feeding executions,
+dismemberment and special strikes on live grounded targets. Native
+time powers, victory slowdown and parry slowdown are separate.
+Impact Pause controls hitstop on attacks dealt and received.
+Parry controls the parry, the riposte and the back roll escape when an
+armed enemy repels a frontal feeding attempt. Press Parry just before
+the enemy's follow-up to escape. A held button does not count.
+Dodge Offset controls the ability to resume a combo after dodging.
+Style and Combo hides their in-game display. Scoring and results continue.
+
+Menu choices are saved in br2mod.ini. An off switch masks its group.
+Turning it back on restores the values in br2mod_combat.ini.
+The menu switches share the same challenge records.
+
+ADVANCED INI REFERENCE
+Edit br2mod_combat.ini next to rayne2.exe. The mod reloads edits while
+the game runs. The ranges below are the individual parser limits.
+Time settings use milliseconds unless a comment specifies otherwise.
+0/1 switches use 0 for off and 1 for on.
+
+BloodRayne 2 - Enhanced Combat
+Normal uses the original combat rules. Use 0 to disable a switch and 1 to enable it.
+Use a decimal point. Values are clamped to the supported ranges.
+
+[Enhanced]
+
+Parry and the escape from a repelled frontal feeding attempt. Set to 0 to disable both.
+  parryEnabled = 1  (range 0 to 1)
+
+Parry window in game-time milliseconds. It follows the native time powers.
+  parryWindowMs = 200  (range 0 to 1500)
+
+Time before the enemy's follow-up in which a fresh Parry press queues a back roll.
+Uses enemy animation time, including native time powers. 0 disables this escape only.
+  feedEscapeWindowMs = 300  (range 0 to 1000)
+
+Back-roll animation playback multiplier and extra collision-checked travel.
+Distance uses world units. Travel duration uses game-time milliseconds.
+  feedEscapeRollRate = 1.0  (range 1.0 to 3.0)
+  feedEscapeTravelDistance = 3.5  (range 0.0 to 8.0)
+  feedEscapeTravelMs = 180  (range 50 to 600)
+
+Preserve the starting facing by removing the escape roll's authored half-turn.
+  feedEscapeKeepFacing = 1  (range 0 to 1)
+
+Maximum parry window in real-time milliseconds, including during Freeze Time.
+  parryMaxInputMs = 1200  (range 1 to 5000)
+
+Cooldown in real-time milliseconds after a parry or an expired window. Presses during cooldown do not rearm it.
+  parryCooldownMs = 240  (range 0 to 5000)
+
+Ignore repeated contact from the same deflected hit for this many real-time milliseconds.
+  parryRepeatMs = 1400  (range 0 to 5000)
+
+Minimum clock multiplier used to advance the parry window.
+  parryClockFloor = 0.25  (range 0.01 to 1.0)
+
+Global slowdown hold and return to normal speed, in real-time milliseconds.
+  parrySlowHoldMs = 300  (range 0 to 3000)
+  parrySlowFadeMs = 420  (range 0 to 3000)
+
+World speed multiplier and additional multiplier for the parried attacker.
+  parryWorldRate = 0.40  (range 0.01 to 1.0)
+  parryAttackerRate = 0.20  (range 0.01 to 1.0)
+
+Minimum and maximum native hit severity eligible for a parry.
+  parryMinSeverity = 1  (range 1 to 5)
+  parryMaxSeverity = 4  (range 1 to 5)
+
+Parry feedback. Spark scale and lifetime apply to the spawned effect.
+  parrySound = 1  (range 0 to 1)
+  parrySpark = 1  (range 0 to 1)
+  parrySparkScale = 2.0  (range 0.1 to 8.0)
+  parrySparkMs = 1000  (range 1 to 5000)
+  parryFallbackSparkMs = 250  (range 1 to 5000)
+  parryShake = 4000.0  (range 0.0 to 12000.0)
+  parryShakeMs = 250  (range 0 to 2000)
+
+Hitstop applies during native time powers. 1 slows world simulation, 0 only the two fighters.
+  hitstopEnabled = 1  (range 0 to 1)
+  hitstopGlobal = 1  (range 0 to 1)
+Global speed multiplier. 0.015 is a near-freeze.
+  hitstopWorldRate = 0.015  (range 0.01 to 1.0)
+
+Hold times in real-time milliseconds. Set a duration to 0 to disable that pulse.
+  bladeHitstopMs = 115  (range 0 to 400)
+  kickHitstopMs = 145  (range 0 to 400)
+  heavyHitstopMs = 175  (range 0 to 400)
+
+Minimum native hit severity for the heavy hitstop profile.
+  heavyMinSeverity = 4  (range 1 to 5)
+
+Minimum interval between pulses in real-time milliseconds. Pulses do not stack.
+  hitstopGapMs = 105  (range 0 to 1000)
+
+Actor speed multipliers used only when hitstopGlobal=0.
+  hitstopRayneRate = 0.015  (range 0.01 to 1.0)
+  hitstopTargetRate = 0.01  (range 0.01 to 1.0)
+
+Brief hitstop when a melee hit takes health from Rayne.
+This pulse also requires hitstopEnabled and never extends an active pulse.
+  receivedHitstopEnabled = 1  (range 0 to 1)
+Durations in real-time milliseconds below and at or above receivedHitstopMinSeverity.
+  receivedLightHitstopMs = 20  (range 0 to 100)
+  receivedHitstopMs = 45  (range 0 to 100)
+  receivedHitstopWorldRate = 0.05  (range 0.01 to 1.0)
+  receivedHitstopMinSeverity = 4  (range 1 to 5)
+  receivedHitstopRayneRate = 0.10  (range 0.01 to 1.0)
+  receivedHitstopAttackerRate = 0.05  (range 0.01 to 1.0)
+
+Extra impact sounds, played once per attack.
+  bladeSound = 1  (range 0 to 1)
+  kickSound = 1  (range 0 to 1)
+
+Camera shake strength per impact type. Set to 0 to disable that shake.
+  bladeShake = 0.0  (range 0.0 to 12000.0)
+  kickShake = 800.0  (range 0.0 to 12000.0)
+  heavyShake = 1700.0  (range 0.0 to 12000.0)
+  meleeShakeMs = 100  (range 0 to 2000)
+
+Gun feedback. The heavy pulse is reserved for scatter shots and explosions.
+  rangedFeedback = 1  (range 0 to 1)
+  rangedGapMs = 180  (range 0 to 2000)
+  rangedHeavyHitstopMs = 38  (range 0 to 300)
+  rangedLightShake = 300.0  (range 0.0 to 12000.0)
+  rangedHeavyShake = 1300.0  (range 0.0 to 12000.0)
+  rangedShakeMs = 120  (range 0 to 2000)
+
+Sound and camera feedback when the harpoon catches an enemy.
+  harpoonFeedback = 1  (range 0 to 1)
+  harpoonSound = 1  (range 0 to 1)
+  harpoonShake = 1000.0  (range 0.0 to 12000.0)
+  harpoonShakeMs = 120  (range 0 to 2000)
+
+Blade or kick input buffer during a harpoon pull, in real-time milliseconds. Set to 0 to disable it.
+  harpoonComboBufferMs = 230  (range 0 to 1000)
+
+Recovery protection after taking damage, in real-time milliseconds. Blocked hits do not refresh it.
+  recoveryMs = 300  (range 0 to 2000)
+
+Protected attack types and maximum severity. Set recoveryMs to 0 to disable all recovery protection.
+  recoveryMelee = 1  (range 0 to 1)
+  recoveryBullets = 1  (range 0 to 1)
+  recoveryMaxSeverity = 4  (range 1 to 5)
+
+Twisted Wind blocks enemy melee during the opening of the active kick.
+Duration is in animation-time milliseconds and capped at the active kick range.
+  twistedWindInvulnerabilityEnabled = 1  (range 0 to 1)
+  twistedWindInvulnerabilityMs = 350  (range 0 to 700)
+
+On-screen hit counter. Counts confirmed hits by enemy and attack.
+  comboEnabled = 1  (range 0 to 1)
+
+Maximum gap between consecutive hits, in real-time milliseconds.
+  comboWindowMs = 2300  (range 100 to 20000)
+  comboMinHits = 2  (range 1 to 99)
+  comboRanged = 1  (range 0 to 1)
+
+Count all pellets from one shot against the same enemy as one hit.
+  comboGroupScatter = 1  (range 0 to 1)
+  comboHarpoonDamage = 1  (range 0 to 1)
+  comboBreakOnDamage = 1  (range 0 to 1)
+
+Right anchor and vertical position as fractions of the screen.
+  comboX = 0.95  (range 0.15 to 0.99)
+  comboY = 0.40  (range 0.10 to 0.85)
+
+Enable recovery protection after taking damage.
+  recoveryEnabled = 1  (range 0 to 1)
+
+Enable the follow-up input buffer during a harpoon pull.
+  harpoonBufferEnabled = 1  (range 0 to 1)
+
+COMBO FINISHERS
+Detects native three-hit combo finishers. The circular attack can also be included.
+Particle scale and field of view are multipliers. Set finisherFov to 1 to disable finisher zoom.
+  finisherEnabled = 1  (range 0 to 1)
+  finisherCircle = 1  (range 0 to 1)
+  finisherFx = 1  (range 0 to 1)
+  finisherFxScale = 2.0  (range 0.1 to 8.0)
+  finisherFxMs = 480  (range 20 to 2500)
+  finisherSound = 1  (range 0 to 1)
+  finisherShake = 2300.0  (range 0.0 to 12000.0)
+
+Finisher hitstop duration in real-time milliseconds. This pulse also requires hitstopEnabled.
+  finisherHitstopMs = 235  (range 0 to 500)
+  finisherShakeMs = 180  (range 0 to 2000)
+  finisherFov = 0.94  (range 0.7 to 1.0)
+  finisherFovMs = 220  (range 0 to 1200)
+
+Slowdown on a killing finisher. If it overlaps a parry, the stronger slowdown takes precedence.
+  finisherKillSlow = 1  (range 0 to 1)
+  finisherKillRate = 0.48  (range 0.1 to 1.0)
+  finisherKillHoldMs = 100  (range 0 to 1200)
+  finisherKillFadeMs = 200  (range 0 to 1200)
+  finisherCooldownMs = 400  (range 0 to 5000)
+
+PARRY RIPOSTE
+Adds feedback to the next blade hit or kick against the parried attacker.
+  riposteEnabled = 1  (range 0 to 1)
+
+Time to land the riposte after a successful parry, in real-time milliseconds.
+  riposteWindowMs = 1250  (range 50 to 5000)
+  riposteFx = 1  (range 0 to 1)
+  riposteFxScale = 1.65  (range 0.1 to 8.0)
+  riposteFxMs = 400  (range 20 to 2500)
+  riposteSound = 1  (range 0 to 1)
+  riposteShake = 2000.0  (range 0.0 to 12000.0)
+  riposteShakeMs = 145  (range 0 to 2000)
+  riposteHitstopMs = 210  (range 0 to 500)
+
+DODGE OFFSET
+Dodge during a blade or kick chain, then tap an attack during or just after the dodge.
+A missed swing can carry the chain. The style bonus requires a hit from the follow-up.
+  dodgeOffsetEnabled = 1  (range 0 to 1)
+
+Grace period after the last eligible swing before dodging, in game-time milliseconds.
+  dodgeOffsetSourceMs = 600  (range 50 to 3000)
+
+Time to press the follow-up after control returns, in game-time milliseconds.
+  dodgeOffsetResumeMs = 300  (range 50 to 4000)
+
+Keep one attack press through the full dodge. Set to 0 to require a press after it.
+  dodgeOffsetBufferEnabled = 1  (range 0 to 1)
+  dodgeOffsetBlade = 1  (range 0 to 1)
+  dodgeOffsetKick = 1  (range 0 to 1)
+
+FEEDING EXECUTIONS. Camera and slowdown effects are suppressed during the native time powers.
+  feedExecutionEnabled = 1  (range 0 to 1)
+One bit per execution in move-list order, excluding gun executions. 1023 enables all ten.
+  feedExecutionMask = 1023  (range 0 to 1023)
+Speed during an execution. 0.18 means 18% of normal speed. Set to 1 to disable slowdown.
+  feedExecutionSlowRate = 0.18  (range 0.05 to 1.0)
+Full slowdown hold, separate hold for Crane's Reply, and return to normal speed. All times are real milliseconds.
+  feedExecutionSlowHoldMs = 1000  (range 0 to 3000)
+  feedExecutionSpinHoldMs = 1100  (range 0 to 3000)
+  feedExecutionSlowFadeMs = 250  (range 0 to 1500)
+Native camera zoom multiplier. 1 disables zoom. Higher values zoom in more (up to 2.5).
+  feedExecutionFov = 1.67  (range 1.0 to 2.5)
+Ease in, hold at full zoom, and ease back out. All times are real milliseconds.
+  feedExecutionFovInMs = 200  (range 0 to 1500)
+  feedExecutionFovHoldMs = 1000  (range 0 to 3000)
+  feedExecutionFovFadeMs = 350  (range 0 to 1500)
+Downward camera tilt in degrees for the rear head-stomp execution only.
+  feedHeadStompTiltDeg = 4.0  (range 0.0 to 8.0)
+
+Use the same slow-motion and smooth zoom for a severed body part or a ground strike.
+Both require a victim that was alive before Rayne's hit. Both are suppressed during native bullet time.
+  dismemberCinematicEnabled = 1  (range 0 to 1)
+  groundCinematicEnabled = 1  (range 0 to 1)
+Minimum time between gameplay cinematics in real-time milliseconds. Active cinematics also prevent overlap.
+  combatCinematicGapMs = 1500  (range 0 to 6000)
+
+STYLE RANK
+D, C, B, A, S, SS, SSS and V. The style streak is separate from the hit counter.
+  styleEnabled = 1  (range 0 to 1)
+  styleWindowMs = 3200  (range 100 to 15000)
+  styleRepeatMs = 1800  (range 0 to 12000)
+
+Repeated melee moves are penalized for the current streak.
+Other actions are penalized when repeated within styleRepeatMs.
+  styleRepeatPercent = 20  (range 0 to 100)
+Percentage for repeating the same combo ender in a streak.
+  styleFinisherRepeatPercent = 20  (range 0 to 100)
+Each distinct scoring action or melee move raises the bonus for the next new action.
+Set either value to 0 to disable the bonus. Combo enders do not earn or advance it.
+  styleVarietyStepPercent = 15  (range 0 to 100)
+  styleVarietyMaxPercent = 60  (range 0 to 300)
+  styleMaxPoints = 999999  (range 1 to 999999)
+
+Base points per action. Set an action to 0 to exclude it.
+  styleBlade = 70  (range 0 to 2000)
+  styleKick = 100  (range 0 to 2000)
+  styleGun = 55  (range 0 to 2000)
+  styleHarpoon = 120  (range 0 to 2000)
+  styleParry = 240  (range 0 to 2000)
+  styleRiposte = 320  (range 0 to 2000)
+  styleFinisher = 50  (range 0 to 2000)
+  styleDodge = 150  (range 0 to 2000)
+
+Minimum streak points for each rank. Thresholds are enforced in ascending order.
+  styleRankC = 220  (range 1 to 50000)
+  styleRankB = 500  (range 1 to 50000)
+  styleRankA = 900  (range 1 to 50000)
+  styleRankS = 1450  (range 1 to 50000)
+  styleRankSS = 2600  (range 1 to 50000)
+  styleRankSSS = 4500  (range 1 to 50000)
+  styleRankV = 8000  (range 1 to 50000)
+  styleBreakOnDamage = 1  (range 0 to 1)
+
+Show the score next to the rank letter.
+  styleShowPoints = 1  (range 0 to 1)
+  styleRankSound = 1  (range 0 to 1)
+  styleFlashMs = 230  (range 0 to 1500)
+
+Horizontal and vertical position as fractions of the screen.
+  styleX = 0.95  (range 0.15 to 0.99)
+  styleY = 0.46  (range 0.10 to 0.90)
+

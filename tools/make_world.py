@@ -90,6 +90,12 @@ LANGS = ["DE", "EN", "ES", "FR", "IT", "RU"]
 # {English: {lang: translation}} appended to stock MSGLIST.TXT.
 # The loader sorts the table (binary search in Localize), so appending is fine.
 T = {
+ "Combat Effects": {"ES":"Efectos de combate","DE":"Kampfeffekte","FR":"Effets de combat","IT":"Effetti di combattimento","RU":"Боевые эффекты"},
+ "Finisher Cinematics": {"ES":"Cinemáticas de remate","DE":"Finisher-Effekte","FR":"Effets de finition","IT":"Effetti delle mosse finali","RU":"Эффекты добиваний"},
+ "Impact Pause": {"ES":"Pausa de impacto","DE":"Trefferpause","FR":"Pause à l'impact","IT":"Pausa all'impatto","RU":"Пауза при ударе"},
+ "Mod Parry": {"ES":"Parry","DE":"Parade","FR":"Parade","IT":"Parata","RU":"Парирование"},
+ "Dodge Offset": {"ES":"Dodge Offset","DE":"Dodge Offset","FR":"Combo après esquive","IT":"Combo dopo schivata","RU":"Комбо после уклонения"},
+ "Style and Combo": {"ES":"Estilo y combo","DE":"Stil und Kombo","FR":"Style et combo","IT":"Stile e combo","RU":"Стиль и комбо"},
  "Challenge Mode":      {"ES":"Modo desafío","DE":"Herausforderung","FR":"Mode défi","IT":"Modalità sfida","RU":"Режим испытаний"},
  "Back to Main Menu":   {"ES":"Volver al menú principal","DE":"Zurück zum Hauptmenü","FR":"Retour au menu principal","IT":"Torna al menu principale","RU":"Назад в главное меню"},
  "Best Time":           {"ES":"Mejor tiempo","DE":"Bestzeit","FR":"Meilleur temps","IT":"Miglior tempo","RU":"Лучшее время"},

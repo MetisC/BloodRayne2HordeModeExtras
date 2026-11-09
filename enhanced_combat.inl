@@ -80,15 +80,18 @@ unsigned g_harpoonBufferedButton;
 bool g_harpoonHeld[2];
 
 void ResetShowcase();
-void TickShowcase(BYTE* rayne, DWORD now);
+void TickShowcase(BYTE* rayne, DWORD now, float gameDeltaMs);
 void DamageShowcase();
 void ResetCombatCinematic();
+void ResetFeedEscape();
+float FeedEscapeAnimationRate(const BYTE* rayne);
 
 #include "feed_execution.inl"
 
 void ResetCombatEffects() {
     ResetShowcase();
     ResetFeedExecution();
+    ResetFeedEscape();
     ResetCombatCinematic();
 #ifdef BR2_COMBAT_TEST
     g_tracedCombatHudFont = false;
@@ -108,8 +111,8 @@ void ResetCombatEffects() {
     memset(g_scatterHits, 0, sizeof g_scatterHits);
 }
 
-void TickCombat(BYTE* rayne, DWORD now) {
-    TickShowcase(rayne, now);
+void TickCombat(BYTE* rayne, DWORD now, float gameDeltaMs) {
+    TickShowcase(rayne, now, gameDeltaMs);
     // Only skip the animation fallback when this update used the scaled actor delta.
     g_hitstop.sampled = 0;
 #ifdef BR2_COMBAT_TEST
@@ -204,7 +207,21 @@ BYTE* CombatCharacter(BYTE* actor) {
     return ((BYTE* (__cdecl*)(BYTE*, void*))0x4050C0)(actor, *(void**)0x7DCF20);
 }
 
+#include "feed_escape.inl"
 #include "combat_cinematic.inl"
+
+bool TwistedWindProtected(const BYTE* rayne) {
+    if (!g_enhanced.twistedWindInvulnerabilityEnabled ||
+        !g_enhanced.twistedWindInvulnerabilityMs ||
+        *(const int*)(rayne + 0x8350) != 0x3D || *(const int*)(rayne + 0x17C) != 0x2F)
+        return false;
+    // combo_circle_kick runs at 30 fps with both kick ranges authored at frames
+    // 14..35. Read the controller's frame so protection tracks native time powers.
+    constexpr float firstKickFrame = 14.0f, endKickFrame = 35.0f;
+    const float end = min(endKickFrame, firstKickFrame + g_enhanced.twistedWindInvulnerabilityMs * 0.03f);
+    const float frame = *(const float*)(rayne + 0x180);
+    return frame >= firstKickFrame && frame < end;
+}
 
 bool RecoveryEligible(const BYTE* hit) {
     if (!g_enhanced.recoveryEnabled || !g_enhanced.recoveryMs) return false;
@@ -222,7 +239,13 @@ int __cdecl ProtectRecovery(BYTE* rayne, const BYTE* hit, float damage) {
         *(const int*)hit == 0x87 || !(damage > 0.0f)) return 0;
     const DWORD id = *(const DWORD*)(hit + 4);
     const int kind = *(const int*)hit, severity = *(const int*)(hit + 8);
-    const BYTE* attacker = *(BYTE* const*)(hit + 0x24);
+    BYTE* attacker = *(BYTE* const*)(hit + 0x24);
+    if (IsMeleeImpact(kind) && TwistedWindProtected(rayne) &&
+        attacker && attacker != rayne && CombatCharacter(attacker)) {
+        LogParry("twisted-wind-blocked", 0, kind, severity, 0x2F, 0, id, attacker, rayne,
+                 0, *(const float*)(rayne + 0x180), damage);
+        return 1;
+    }
     const DWORD now = GetTickCount();
     auto* incoming = RememberIncoming(attacker, id, now, false);
     if (!g_recoveryActive || now - g_recoveryAt >= (DWORD)g_enhanced.recoveryMs ||
@@ -265,6 +288,7 @@ void __cdecl ConfirmRayneDamage(BYTE* rayne, const BYTE* hit, float damage) {
              *(int*)(rayne + 0x17C), 0, *(const DWORD*)(hit + 4), *(BYTE* const*)(hit + 0x24),
              rayne, 0, damage, *(float*)(rayne + 0x39C8), *(float*)(rayne + 0x8360));
     if (g_enhanced.comboBreakOnDamage) g_comboHits = 0;
+    FeedEscapeDamageApplied(rayne, hit);
     DamageShowcase();
     g_harpoonBufferedButton = 0;
     const DWORD now = GetTickCount();
@@ -572,11 +596,12 @@ void __declspec(naked) HookCombatHarpoonSecondary() {
 }
 
 void DrawCombatCombo(BYTE* game) {
-    if (!EnhancedCombatActive() || (*(int*)(game + 0x390) && *(int*)(game + 0xC))) return;
+    if (!CombatEffectEnabled(EffectStyleHud) || !EnhancedCombatActive() ||
+        (*(int*)(game + 0x390) && *(int*)(game + 0xC))) return;
     const DWORD now = GetTickCount();
     const bool combo = g_enhanced.comboEnabled && g_comboHits >= g_enhanced.comboMinHits &&
         now - g_comboAt < (DWORD)g_enhanced.comboWindowMs;
-    if (!combo && (!g_enhanced.styleEnabled || !g_style.points)) return;
+    if (!combo && (!g_enhanced.styleEnabled || (!g_style.points && g_dodgeOffset.flashMs <= 0.0f))) return;
 
     // The onscreen-message slot can switch fonts and leave a script's scale
     // behind. Size these two labels like the native default message font.

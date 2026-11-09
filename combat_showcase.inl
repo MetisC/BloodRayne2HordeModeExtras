@@ -23,8 +23,8 @@ const BYTE* g_riposteTarget;
 DWORD g_riposteAt;
 
 struct DodgeOffset {
-    int lastMove, savedMove;
-    DWORD lastAt, startedAt, pressedAt;
+    int lastMove, savedMove, selectedMove, followupMove;
+    float sourceAgeMs, resumeAgeMs, flashMs;
     unsigned button;
     bool evading;
 };
@@ -175,12 +175,14 @@ bool ResumeStance(int state) {
 }
 
 bool OffsetSource(int state, int move) {
-    if (move < 9 || move > 0x3C) return false;
+    if (!((move >= 9 && move <= 0x14) || (move >= 0x29 && move <= 0x3C)))
+        return false;
+    if (state >= 0x7B && state <= 0x98) state -= 0x24; // mirrored locked-on attacks
     return ((state >= 0x1A && state <= 0x2D) || (state >= 0x43 && state <= 0x74)) &&
            !ShowcaseFinisherState(state);
 }
 
-void TickShowcase(BYTE* rayne, DWORD now) {
+void TickShowcase(BYTE* rayne, DWORD now, float gameDeltaMs) {
     if (!g_enhanced.finisherEnabled) g_showcasePulse = {};
     if (!g_enhanced.riposteEnabled || now - g_riposteAt > (DWORD)g_enhanced.riposteWindowMs)
         g_riposteTarget = NULL;
@@ -193,61 +195,81 @@ void TickShowcase(BYTE* rayne, DWORD now) {
         return;
     }
     const int state = *(int*)(rayne + 0x17C);
+    const int move = *(int*)(rayne + 0x8350);
+    const int queued = *(int*)(rayne + 0x8354);
     const bool evading = DodgeAnimation(state);
-    if (evading && !g_dodgeOffset.evading) {
-        g_dodgeOffset.savedMove = now - g_dodgeOffset.lastAt <=
-            (DWORD)g_enhanced.dodgeOffsetSourceMs ? g_dodgeOffset.lastMove : 0;
-        g_dodgeOffset.startedAt = now;
-        LogParry("dodge-enter", now - g_dodgeOffset.lastAt, 0, 0, state, 0, 0,
-                 rayne, NULL, 0, (float)g_dodgeOffset.savedMove);
-        g_dodgeOffset.button = 0;
-    }
-    g_dodgeOffset.evading = evading;
-    if (!g_dodgeOffset.savedMove) return;
-    if (now - g_dodgeOffset.startedAt >= (DWORD)g_enhanced.dodgeOffsetWindowMs ||
-        (!evading && !ResumeStance(state))) {
-        g_dodgeOffset.savedMove = 0;
-        g_dodgeOffset.button = 0;
+    const bool resume = ResumeStance(state) && !queued;
+    auto& offset = g_dodgeOffset;
+    offset.flashMs = max(0.0f, offset.flashMs - gameDeltaMs);
+    if (offset.selectedMove != queued) offset.selectedMove = 0;
+    if (evading) {
+        if (!offset.evading) {
+            offset.savedMove = offset.sourceAgeMs <= g_enhanced.dodgeOffsetSourceMs ? offset.lastMove : 0;
+            LogParry("dodge-enter", (DWORD)offset.sourceAgeMs, 0, 0, state, 0, 0,
+                     rayne, NULL, 0, (float)offset.savedMove);
+            offset.lastMove = 0;
+            offset.followupMove = 0;
+            offset.resumeAgeMs = 0.0f;
+            offset.button = 0;
+        }
+        offset.evading = true;
+        if (!offset.savedMove || !g_enhanced.dodgeOffsetBufferEnabled) return;
+        for (unsigned i = 0; i < _countof(AttackButtons); ++i) {
+            const bool enabled = i == 0 ? g_enhanced.dodgeOffsetBlade : g_enhanced.dodgeOffsetKick;
+            if (!enabled || *(int*)(rayne + AttackButtons[i]) != 1 || g_harpoonHeld[i]) continue;
+            offset.button = AttackButtons[i];
+            LogParry("dodge-buffer-armed", 0, 0, 0, offset.button, 0, 0, rayne);
+        }
         return;
     }
+    const bool exitedDodge = offset.evading;
+    offset.evading = false;
 
-    if (evading && g_enhanced.dodgeOffsetBufferMs) {
-        for (unsigned i = 0; i < _countof(AttackButtons); ++i) {
-            if (*(int*)(rayne + AttackButtons[i]) != 1 || g_harpoonHeld[i]) continue;
-            g_dodgeOffset.button = AttackButtons[i];
-            g_dodgeOffset.pressedAt = now;
-            LogParry("dodge-buffer-armed", 0, 0, 0, AttackButtons[i], 0, 0, rayne);
-        }
-    } else if (g_dodgeOffset.button) {
-        if (g_enhanced.dodgeOffsetBufferMs &&
-            now - g_dodgeOffset.pressedAt < (DWORD)g_enhanced.dodgeOffsetBufferMs &&
-            !*(int*)(rayne + AttackButtons[0]) && !*(int*)(rayne + AttackButtons[1]))
-            *(int*)(rayne + g_dodgeOffset.button) = 1;
-        g_dodgeOffset.button = 0;
+    // Refresh from the native move and animation even if the swing hit nothing.
+    if (OffsetSource(state, move)) {
+        offset.lastMove = move;
+        offset.sourceAgeMs = 0.0f;
+    } else if (!ResumeStance(state)) {
+        offset.lastMove = 0;
+    } else {
+        offset.sourceAgeMs += gameDeltaMs;
     }
+
+    if (!offset.savedMove) return;
+    if (!exitedDodge) offset.resumeAgeMs += gameDeltaMs;
+    if (!ResumeStance(state) || offset.resumeAgeMs >= g_enhanced.dodgeOffsetResumeMs) {
+        offset.savedMove = 0;
+        offset.button = 0;
+        return;
+    }
+    if (!resume || !offset.button) return;
+    const bool enabled = offset.button == AttackButtons[0] ?
+        g_enhanced.dodgeOffsetBlade != 0 : g_enhanced.dodgeOffsetKick != 0;
+    if (enabled && g_enhanced.dodgeOffsetBufferEnabled &&
+        !*(int*)(rayne + AttackButtons[0]) && !*(int*)(rayne + AttackButtons[1]))
+        *(int*)(rayne + offset.button) = 1;
+    offset.button = 0;
 }
 
 int ChooseOffsetMove(BYTE* rayne, DWORD selector, bool enabled) {
     const auto choose = (int (__thiscall*)(BYTE*))selector;
     if (!EnhancedCombatActive() || !g_enhanced.dodgeOffsetEnabled || !enabled ||
         rayne != *(BYTE**)RayneActor || !g_dodgeOffset.savedMove ||
-        GetTickCount() - g_dodgeOffset.startedAt >= (DWORD)g_enhanced.dodgeOffsetWindowMs ||
-        !ResumeStance(*(int*)(rayne + 0x17C)) || *(int*)(rayne + 0x8354) ||
-        *(int*)(rayne + 0x3A70) != 1) return choose(rayne);
+        g_dodgeOffset.resumeAgeMs >= g_enhanced.dodgeOffsetResumeMs ||
+        !ResumeStance(*(int*)(rayne + 0x17C)) || *(int*)(rayne + 0x8354)) return choose(rayne);
 
     // Temporarily present the previous step to the stock chooser. It still
     // enforces move unlocks, the selected attack and the actual input state.
     int& current = *(int*)(rayne + 0x8350);
     const int savedCurrent = current;
+    const int stock = choose(rayne);
     current = g_dodgeOffset.savedMove;
     const int next = choose(rayne);
     current = savedCurrent;
-    const int source = g_dodgeOffset.savedMove;
     g_dodgeOffset.savedMove = 0;
-    if (next <= 0 || next > 0x44) return choose(rayne);
-    AddStyle(rayne, StyleDodge, g_enhanced.styleDodge, GetTickCount());
-    LogParry("dodge-offset", GetTickCount() - g_dodgeOffset.startedAt, 0, 0, next, 0, 0,
-             rayne, NULL, 0, (float)source);
+    g_dodgeOffset.button = 0;
+    if (next < 9 || next > 0x44 || next == stock) return stock;
+    g_dodgeOffset.selectedMove = next;
     return next;
 }
 
@@ -256,6 +278,37 @@ int __fastcall HookDodgeBlade(BYTE* rayne, void*) {
 }
 int __fastcall HookDodgeKick(BYTE* rayne, void*) {
     return ChooseOffsetMove(rayne, 0x54C730, g_enhanced.dodgeOffsetKick != 0);
+}
+
+void __cdecl DodgeMoveStarted(BYTE* rayne, int move) {
+    if (!EnhancedCombatActive() || !g_enhanced.dodgeOffsetEnabled || rayne != *(BYTE**)RayneActor)
+        return;
+    auto& offset = g_dodgeOffset;
+    offset.followupMove = move == offset.selectedMove ? move : 0;
+    offset.selectedMove = 0;
+    if (!offset.followupMove) return;
+    offset.flashMs = (float)g_enhanced.styleFlashMs;
+    LogParry("dodge-offset", (DWORD)offset.resumeAgeMs, 0, 0, move, 0, 0, rayne);
+}
+
+// Native startMove epilogue, after the selected attack animation is started.
+void __declspec(naked) HookDodgeMoveStarted() {
+    BR2_SAVE_CPU
+    __asm {
+        push dword ptr [ebp + 8]
+        push esi
+        call DodgeMoveStarted
+        add esp, 8
+    }
+    BR2_RESTORE_CPU
+    __asm {
+        pop edi
+        pop esi
+        pop ebx
+        mov esp, ebp
+        pop ebp
+        ret 4
+    }
 }
 
 bool ShowcaseConfirmedHit(BYTE* rayne, BYTE* victim, const BYTE* hit, int type, int severity,
@@ -275,11 +328,10 @@ bool ShowcaseConfirmedHit(BYTE* rayne, BYTE* victim, const BYTE* hit, int type, 
     const int state = *(int*)(rayne + 0x17C), move = *(int*)(rayne + 0x8350);
     if (firstTarget) {
         AddStyle(rayne, kick ? StyleKick : StyleBlade, kick ? g_enhanced.styleKick : g_enhanced.styleBlade, now, move);
-        if (OffsetSource(state, move)) {
-            g_dodgeOffset.lastMove = move;
-            g_dodgeOffset.lastAt = now;
-        } else if (!DodgeAnimation(state)) {
-            g_dodgeOffset.lastMove = 0;
+        if (g_dodgeOffset.followupMove && move == g_dodgeOffset.followupMove) {
+            g_dodgeOffset.followupMove = 0;
+            AddStyle(rayne, StyleDodge, g_enhanced.styleDodge, now);
+            LogParry("dodge-offset-hit", 0, type, severity, move, 0, id, victim, rayne, group);
         }
     }
 
@@ -338,16 +390,20 @@ bool ShowcaseConfirmedHit(BYTE* rayne, BYTE* victim, const BYTE* hit, int type, 
 }
 
 void DrawStyleRank(void* font, int width, int height, DWORD now) {
-    if (!g_enhanced.styleEnabled || !g_style.points ||
-        now - g_style.at >= (DWORD)g_enhanced.styleWindowMs) return;
-    const int rank = StyleRank(g_style.points);
-    const char* grade = StyleGrade(g_style.points);
+    const float offsetFlash = g_enhanced.styleFlashMs > 0 ?
+        min(1.0f, g_dodgeOffset.flashMs / g_enhanced.styleFlashMs) : 0.0f;
+    const int points = now - g_style.at < (DWORD)g_enhanced.styleWindowMs ? g_style.points : 0;
+    if (!g_enhanced.styleEnabled || (!points && offsetFlash <= 0.0f)) return;
+    const int rank = StyleRank(points);
+    const char* grade = StyleGrade(points);
     const DWORD colors[] = {0xFFDBDBDB, 0xFFAEDAFF, 0xFFFFA858, 0xFFFF745C, 0xFFFFDE78,
                             0xFFFFAE38, 0xFFFF648A, 0xFFE8A6FF};
     DWORD color = colors[rank];
     const DWORD elapsed = now - g_style.flashAt;
-    if (g_style.flashRank == rank && elapsed < (DWORD)g_enhanced.styleFlashMs) {
-        const unsigned amount = 255 * (g_enhanced.styleFlashMs - elapsed) / g_enhanced.styleFlashMs;
+    unsigned amount = (unsigned)(offsetFlash * 180.0f);
+    if (g_style.flashRank == rank && elapsed < (DWORD)g_enhanced.styleFlashMs)
+        amount = max(amount, 255u * (g_enhanced.styleFlashMs - elapsed) / g_enhanced.styleFlashMs);
+    if (amount) {
         color = 0xFF000000;
         for (unsigned shift = 0; shift < 24; shift += 8) {
             const unsigned c = (colors[rank] >> shift) & 255;
@@ -355,7 +411,7 @@ void DrawStyleRank(void* font, int width, int height, DWORD now) {
         }
     }
     char label[32];
-    if (g_enhanced.styleShowPoints) sprintf_s(label, "%s  %d", grade, g_style.points);
+    if (g_enhanced.styleShowPoints) sprintf_s(label, "%s  %d", grade, points);
     else sprintf_s(label, "%s", grade);
     ((void (__thiscall*)(void*, int, int, DWORD, DWORD, const char*))0x4E6C60)
         (font, (int)(width * g_enhanced.styleX), (int)(height * g_enhanced.styleY),

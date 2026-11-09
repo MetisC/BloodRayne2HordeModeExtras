@@ -83,6 +83,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define MENU_EXTRAS    0x0F        // native Extras menu
 #define MENU_OPTIONS   0x17
 #define MENU_CHALLENGE 0x3D        // free slot -> lands on hooked epilogue
+#define MENU_EFFECTS   0x3E        // second free slot, same builder epilogue
 
 // Action codes >= 0x110: natives stop at 0x10C, zero collisions.
 #define AC_CHALLENGE_MENU 0x110
@@ -91,6 +92,8 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_COUNT_CYCLE    0x113    // cycle enemy-count selection
 #define AC_GUNS_CYCLE     0x114    // cycle weapons on/off for the run
 #define AC_BARS_CYCLE     0x115
+#define AC_EFFECTS_MENU   0x116
+#define AC_EFFECT_BASE    0x117
 #define AC_BACK           0x11C
 #define AC_SKIN           0x11D
 #define AC_PHOTO          0x11E
@@ -114,6 +117,21 @@ enum CombatMode { CombatNormal, CombatEnhanced, CombatCount };
 static const char* const COMBAT_NAMES[] = { "Normal", "Enhanced" };
 static int g_combat = CombatNormal;
 static volatile LONG g_combatDirty = 0;
+enum CombatEffect { EffectCinematics, EffectHitstop, EffectParry, EffectDodge, EffectStyleHud, EffectCount };
+static const struct { const char* key; const char* label; } COMBAT_EFFECTS[] = {
+    {"finisherCinematics", "Finisher Cinematics"},
+    {"impactPause", "Impact Pause"},
+    {"parry", "Mod Parry"},
+    {"dodgeOffset", "Dodge Offset"},
+    {"styleHud", "Style and Combo"},
+};
+static_assert(_countof(COMBAT_EFFECTS) == EffectCount && AC_EFFECT_BASE + EffectCount == AC_BACK,
+              "Combat effect table and menu actions must match");
+static volatile LONG g_effects = (1L << EffectCount) - 1;
+static volatile LONG g_effectsDirty = 0;
+static bool CombatEffectEnabled(CombatEffect effect) {
+    return (g_effects & (1L << effect)) != 0;
+}
 static char g_pendingChain[64];
 static int g_legacyGuards = 0;
 static int g_chainTrace = 0;
@@ -415,6 +433,12 @@ static Localize_t Localize = (Localize_t)FN_LOCALIZE;
 // Column order: EN, FR, IT, ES, DE, JA(unused->0), RU
 typedef struct { const char* key; const char* t[7]; } ModLoc;
 static const ModLoc MODL[] = {
+ {"Combat Effects", {"Combat Effects","Effets de combat","Effetti di combattimento","Efectos de combate","Kampfeffekte",0,"\xC1\xEE\xE5\xE2\xFB\xE5 \xFD\xF4\xF4\xE5\xEA\xF2\xFB"}},
+ {"Finisher Cinematics", {"Finisher Cinematics","Effets de finition","Effetti delle mosse finali","Cinem\xE1ticas de remate","Finisher-Effekte",0,"\xDD\xF4\xF4\xE5\xEA\xF2\xFB \xE4\xEE\xE1\xE8\xE2\xE0\xED\xE8\xE9"}},
+ {"Impact Pause", {"Impact Pause","Pause \xE0 l'impact","Pausa all'impatto","Pausa de impacto","Trefferpause",0,"\xCF\xE0\xF3\xE7\xE0 \xEF\xF0\xE8 \xF3\xE4\xE0\xF0\xE5"}},
+ {"Mod Parry", {"Parry","Parade","Parata","Parry","Parade",0,"\xCF\xE0\xF0\xE8\xF0\xEE\xE2\xE0\xED\xE8\xE5"}},
+ {"Dodge Offset", {"Dodge Offset","Combo apr\xE8s esquive","Combo dopo schivata","Dodge Offset","Dodge Offset",0,"\xCA\xEE\xEC\xE1\xEE \xEF\xEE\xF1\xEB\xE5 \xF3\xEA\xEB\xEE\xED\xE5\xED\xE8\xFF"}},
+ {"Style and Combo", {"Style and Combo","Style et combo","Stile e combo","Estilo y combo","Stil und Kombo",0,"\xD1\xF2\xE8\xEB\xFC \xE8 \xEA\xEE\xEC\xE1\xEE"}},
  {"Challenge Mode", {"Challenge Mode","Mode d\xE9""fi","Modalit\xE0 sfida","Modo desaf\xEDo","Herausforderung",0,"\xD0\xE5\xE6\xE8\xEC \xE8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE9"}},
  {"Back to Main Menu", {"Back to Main Menu","Retour au menu principal","Torna al menu principale","Volver al men\xFA principal","Zur\xFC""ck zum Hauptmen\xFC",0,"\xCD\xE0\xE7\xE0\xE4 \xE2 \xE3\xEB\xE0\xE2\xED\xEE\xE5 \xEC\xE5\xED\xFE"}},
  {"Best Time", {"Best Time","Meilleur temps","Miglior tempo","Mejor tiempo","Bestzeit",0,"\xCB\xF3\xF7\xF8\xE5\xE5 \xE2\xF0\xE5\xEC\xFF"}},
@@ -501,6 +525,42 @@ static float g_runAccum;         // accumulated run seconds (game time)
 static int   g_runArmed;         // first enemy emitted -> clock counts
 static int   g_runDone;          // completion latched -> no more counting
 static int   g_doneStreak;
+static bool  g_resultPauseLocked;
+
+static bool __cdecl ChallengeResultsBlockPause(const BYTE* game) {
+    const char* level = (const char*)G_CURRENT_LEVEL;
+    if (!IsStandaloneChallengeLevel(level)) return false;
+    // The script can show its native banner before HudTick latches our result.
+    if (!g_resultPauseLocked && *(const float*)(game + 0x4F0) > 0.0f &&
+        !strcmp((const char*)(game + 0x3F0), "Challenge Completed"))
+        g_resultPauseLocked = true;
+    return g_resultPauseLocked || g_runDone;
+}
+
+// Esc and Start converge here before the engine changes menu/audio state.
+static void __declspec(naked) HookChallengePause() {
+    BR2_SAVE_CPU
+    __asm {
+        push edi
+        call ChallengeResultsBlockPause
+        add esp, 4
+        test al, al
+        jnz blocked
+    }
+    BR2_RESTORE_CPU
+    __asm {
+        push 0
+        push 0x4F7B00
+        push 0x561FD0
+        ret
+    blocked:
+    }
+    BR2_RESTORE_CPU
+    __asm {
+        push 0x4F7B68
+        ret
+    }
+}
 
 #include "parry.inl"
 #include "enhanced_combat.inl"
@@ -528,6 +588,7 @@ static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
     g_killCount = 0;
     g_runArmed = 0;
     g_runDone = 0;
+    g_resultPauseLocked = false;
     g_runAccum = 0.0f;
     g_doneStreak = 0;
     if (g_timeChal < 0) return;
@@ -880,6 +941,7 @@ static void __cdecl HudTick() {
     if (!IsStandaloneChallengeLevel(lvl)) return;
     if (menuOpen) return;
     if (!gso) return;
+    ChallengeResultsBlockPause((const BYTE*)gso);
     if (g_trigTrace) {
         static DWORD s_lastDump = 0;
         DWORD now = GetTickCount();
@@ -1087,6 +1149,8 @@ static void __cdecl OnMenuBuilt() {
         sprintf(combat, "%s: %s", ModLocalize("Combat"),
                 ModLocalize(g_combat == CombatEnhanced ? "Combat Enhanced" : "Combat Normal"));
         AddMenuItem(combat, AC_COMBAT, 0);
+        if (g_combat == CombatEnhanced)
+            AddMenuItem(ModLocalize("Combat Effects"), AC_EFFECTS_MENU, 0);
         static char buf[64];
         // "Dhampir" is a proper name: show it verbatim in every language
         // (the native ES string is "Dhampir:" which would read wrong here).
@@ -1115,6 +1179,21 @@ static void __cdecl OnMenuBuilt() {
     case MENU_CHALLENGE:
         BuildChallengeMenu();
         break;
+    case MENU_EFFECTS: {
+        // The generic builder clears the panel flag. Restore it on every
+        // build so the renderer lays out the title and rows at screen center.
+        strcpy_s((char*)0x5EEDAC8, 72, ModLocalize("Combat Effects"));
+        *(unsigned char*)G_MENU_REBUILD = 1; // native centered panel at 0x563E90
+        *(int*)0x5EF5640 = 2;
+        for (int effect = 0; effect < EffectCount; ++effect) {
+            char label[72];
+            sprintf_s(label, "%s: %s", ModLocalize(COMBAT_EFFECTS[effect].label),
+                      ModLocalize(CombatEffectEnabled((CombatEffect)effect) ? "On" : "Off"));
+            AddMenuItem(label, AC_EFFECT_BASE + effect, 0);
+        }
+        AddMenuItem(ModLocalize("Back"), AC_BACK, 0);
+        break;
+    }
     }
     TraceGlobals("menu-after-injection");
 }
@@ -1185,6 +1264,20 @@ static int __cdecl DispatchOurs(int action) {
     }
     if (action == AC_CHALLENGE_MENU) { CallMenu(MENU_CHALLENGE); return 0; }
     if (action == AC_BACK)           { MenuBack();              return 0; }
+    if (action == AC_EFFECTS_MENU) {
+        if (g_combat == CombatEnhanced && *(int*)G_MENU_STATE == MENU_OPTIONS)
+            CallMenu(MENU_EFFECTS);
+        return 0;
+    }
+    if (action >= AC_EFFECT_BASE && action < AC_EFFECT_BASE + EffectCount) {
+        if (g_combat == CombatEnhanced && *(int*)G_MENU_STATE == MENU_EFFECTS) {
+            const LONG bit = 1L << (action - AC_EFFECT_BASE);
+            InterlockedXor(&g_effects, bit);
+            InterlockedOr(&g_effectsDirty, bit);
+            *(unsigned char*)G_MENU_REBUILD = 1;
+        }
+        return 0;
+    }
     if (action == AC_COMBAT) {
         g_combat = g_combat == CombatNormal ? CombatEnhanced : CombatNormal;
         if (g_runBars >= 0) g_runCombatChanged = true;
@@ -1320,6 +1413,26 @@ static void __declspec(naked) HookChainCmd() {
 }
 
 // ------------------------- naked thunks ------------------------------------
+// The native panel replaces its measured height with 320 + two row heights
+// above a threshold. The eighth Options row crosses it, leaving a large gap.
+static void __declspec(naked) HookOptionsPanelHeight() {
+    __asm {
+        pushfd
+        cmp dword ptr ds:[G_MENU_STATE], MENU_OPTIONS
+        jne stock
+        cmp g_combat, CombatEnhanced
+        jne stock
+        popfd
+        push 0x5640CD // use the measured height already in [ebp - 0x5AC]
+        ret
+    stock:
+        popfd
+        fild dword ptr [ebp - 0x5C4]
+        push 0x5640BF
+        ret
+    }
+}
+
 // HookA @0x561E1A: stolen `mov ecx,[0x7c07f8]` (6B) -> `push HookA; ret` (6B)
 static void __declspec(naked) HookA() {
     BR2_SAVE_CPU
@@ -1691,15 +1804,14 @@ static void PatchChecked(DWORD site,const char* expected,int length,void* target
     PatchSite((void*)site,length,target);
 }
 
-static void EnableChallengeCancel() {
+static void EnableSubmenuCancel(int menu, BYTE expected) {
     // Native Esc/B dispatch indexes this table by menu ID minus one.
-    // Slot 0x3D's original case is inert unless a separate flag is set.
     // Case 8 goes straight to MenuBack, as used by stock submenus.
-    BYTE* entry = (BYTE*)(0x5691DC + MENU_CHALLENGE - 1);
+    BYTE* entry = (BYTE*)(0x5691DC + menu - 1);
     DWORD old;
-    if (*entry != 0x0A ||
+    if (*entry != expected ||
         !VirtualProtect(entry, 1, PAGE_EXECUTE_READWRITE, &old)) {
-        Trace("PATCH failed: Challenge cancel entry");
+        Trace("PATCH failed: cancel entry for menu %X", menu);
         return;
     }
     *entry = 0x08;
@@ -1817,6 +1929,9 @@ static void LoadConfig() {
         if (!_stricmp(buf, PRESETS[i].name)) g_diff = i;
     GetPrivateProfileStringA("Combat", "mode", "Normal", buf, sizeof buf, ".\\br2mod.ini");
     g_combat = !_stricmp(buf, "Enhanced") ? CombatEnhanced : CombatNormal;
+    for (int effect = 0; effect < EffectCount; ++effect)
+        if (!GetPrivateProfileIntA("Combat", COMBAT_EFFECTS[effect].key, 1, ".\\br2mod.ini"))
+            g_effects &= ~(1L << effect);
     GetPrivateProfileStringA("Appearance", "skin", "default",
                              g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
     {   // remembered challenge options
@@ -1852,12 +1967,18 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x609D90,"\x55\x8b\xec\x56\x8b\xf1",6,HookFeedMotionRequest);
     PatchChecked(0x56A170,"\x55\x8b\xec\x8b\x45\x08",6,HookGetBonePos);
     PatchSite((void*)0x561E1A, 6, HookA);
+    PatchChecked(0x5640B9,"\xDB\x85\x3C\xFA\xFF\xFF",6,HookOptionsPanelHeight);
     PatchSite((void*)0x5670E1, 12, HookB);
-    EnableChallengeCancel();
+    EnableSubmenuCancel(MENU_CHALLENGE, 0x0A);
+    EnableSubmenuCancel(MENU_EFFECTS, 0x0B);
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
+    PatchChecked(0x4F7AF9,"\x6A\x00\xE8\xD0\xA4\x06\x00",7,HookChallengePause);
     PatchCallChecked(0x4F9137,"\xE8\xD4\xE6\xFF\xFF",5,HookChallengeExit);
     PatchCallChecked(0x4F8DB3,"\xE8\x68\xFA\xFF\xFF",5,HookParryInput);
+    PatchCallChecked(0x663EF3,"\x68\x74\x2D\x72\x00\x56\x8B\xCF\xFF\xD2",10,HookFeedRepel);
+    PatchCallChecked(0x6738E4,"\x68\xBC\x3E\x72\x00\x56\x8B\xCF\xFF\xD0",10,HookFeedRepelAlternate);
+    PatchCallChecked(0x67492C,"\xE8\xAF\xD5\x01\x00",5,HookFeedEscapeRootAngles);
     PatchCallChecked(0x4F44FF,"\xE8\x7C\x52\x15\x00",5,HookParryWorldFactor);
     PatchCallChecked(0x6498D8,"\xE8\x63\xFD\xFF\xFF",5,HookParryActorFactor);
     PatchChecked(0x551206,"\x53\x8B\xCE\xE8\xE2\x7A\x11\x00",8,HookParryContact);
@@ -1887,6 +2008,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchCallChecked(0x586607,"\xE8\x84\xF1\xE7\xFF",5,HookGunMessageInit);
     PatchCallChecked(0x5508C0,"\xE8\x0B\xBB\xFF\xFF",5,HookDodgeBlade);
     PatchCallChecked(0x5508B7,"\xE8\x74\xBE\xFF\xFF",5,HookDodgeKick);
+    PatchChecked(0x54D33C,"\x5F\x5E\x5B\x8B\xE5\x5D\xC2\x04\x00",9,HookDodgeMoveStarted);
     PatchCallChecked(0x672A7B,"\xE8\xA0\x51\xF9\xFF",5,HookCombatAnimationStep); // Rayne
     PatchCallChecked(0x5BB9DE,"\xE8\x3D\xC2\x04\x00",5,HookCombatAnimationStep); // punk controller
     PatchCallChecked(0x5CD9DA,"\xE8\x41\xA2\x03\x00",5,HookCombatAnimationStep); // alternate controller
@@ -1957,6 +2079,16 @@ static DWORD WINAPI Worker(LPVOID) {
             WritePrivateProfileStringA("Combat", "mode", NULL, ".\\br2mod.ini");
             WritePrivateProfileStringA("Combat", "mode",
                                        COMBAT_NAMES[g_combat], ".\\br2mod.ini");
+        }
+        const LONG effectsDirty = InterlockedExchange(&g_effectsDirty, 0);
+        if (effectsDirty) {
+            const LONG effects = InterlockedCompareExchange(&g_effects, 0, 0);
+            for (int effect = 0; effect < EffectCount; ++effect) {
+                const LONG bit = 1L << effect;
+                if ((effectsDirty & bit) && !WritePrivateProfileStringA("Combat",
+                    COMBAT_EFFECTS[effect].key, (effects & bit) ? "1" : "0", ".\\br2mod.ini"))
+                    InterlockedOr(&g_effectsDirty, bit);
+            }
         }
         if (InterlockedExchange(&g_skinDirty, 0)) {
             WritePrivateProfileStringA("Appearance", "skin", NULL, ".\\br2mod.ini");

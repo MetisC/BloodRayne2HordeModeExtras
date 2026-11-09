@@ -2,6 +2,11 @@
 #define ENHANCED_SETTINGS(X) \
     X(int, parryEnabled, 1, 0, 1) \
     X(int, parryWindowMs, 200, 0, 1500) \
+    X(int, feedEscapeWindowMs, 300, 0, 1000) \
+    X(float, feedEscapeRollRate, 1.0f, 1.0f, 3.0f) \
+    X(int, feedEscapeKeepFacing, 1, 0, 1) \
+    X(float, feedEscapeTravelDistance, 3.5f, 0.0f, 8.0f) \
+    X(int, feedEscapeTravelMs, 180, 50, 600) \
     X(int, parryMaxInputMs, 1200, 1, 5000) \
     X(int, parryCooldownMs, 240, 0, 5000) \
     X(int, parryRepeatMs, 1400, 0, 5000) \
@@ -57,6 +62,8 @@
     X(int, recoveryMelee, 1, 0, 1) \
     X(int, recoveryBullets, 1, 0, 1) \
     X(int, recoveryMaxSeverity, 4, 1, 5) \
+    X(int, twistedWindInvulnerabilityEnabled, 1, 0, 1) \
+    X(int, twistedWindInvulnerabilityMs, 350, 0, 700) \
     X(int, comboEnabled, 1, 0, 1) \
     X(int, comboWindowMs, 2300, 100, 20000) \
     X(int, comboMinHits, 2, 1, 99) \
@@ -109,8 +116,8 @@
     X(int, combatCinematicGapMs, 1500, 0, 6000) \
     X(int, dodgeOffsetEnabled, 1, 0, 1) \
     X(int, dodgeOffsetSourceMs, 600, 50, 3000) \
-    X(int, dodgeOffsetWindowMs, 1050, 100, 4000) \
-    X(int, dodgeOffsetBufferMs, 290, 0, 1200) \
+    X(int, dodgeOffsetResumeMs, 300, 50, 4000) \
+    X(int, dodgeOffsetBufferEnabled, 1, 0, 1) \
     X(int, dodgeOffsetBlade, 1, 0, 1) \
     X(int, dodgeOffsetKick, 1, 0, 1) \
     X(int, styleEnabled, 1, 0, 1) \
@@ -162,15 +169,16 @@ unsigned long long g_pendingCombatProfile, g_combatProfile;
 
 unsigned long long CombatProfile(const EnhancedSettings& settings) {
     // Version the rules and hash effective values, independent of INI formatting.
-    unsigned long long hash = 14695981039346656037ull ^ 9ull;
+    unsigned long long hash = 14695981039346656037ull ^ 10ull;
     EnhancedSettings rules = settings;
     // Framing is visual only. Keep its original v4 hash contribution so
     // records already saved with the default framing are still visible.
     rules.feedHeadStompTiltDeg = 3.0f;
-    // The new grades are display thresholds for already comparable scores.
+    // Keep existing records for menu-grouped feed escape and display thresholds.
 #define MIX(type, key, value, low, high) \
     if (strcmp(#key, "trace") != 0 && strcmp(#key, "styleRankSS") != 0 && \
-        strcmp(#key, "styleRankSSS") != 0 && strcmp(#key, "styleRankV") != 0) { \
+        strcmp(#key, "styleRankSSS") != 0 && strcmp(#key, "styleRankV") != 0 && \
+        strncmp(#key, "feedEscape", 10) != 0) { \
         const type field = rules.key == 0 ? type(0) : rules.key; \
         DWORD bits; \
         memcpy(&bits, &field, sizeof bits); \
@@ -257,5 +265,19 @@ void SampleEnhancedSettings() {
         if (g_runBars >= 0 && !g_runDone && g_runCombat == CombatEnhanced &&
             g_runCombatProfile != g_combatProfile)
             g_runCombatChanged = true;
+        // Menu switches only mask the live settings. Records still use the INI profile.
+        if (!CombatEffectEnabled(EffectCinematics)) {
+            g_enhanced.feedExecutionEnabled = 0;
+            g_enhanced.dismemberCinematicEnabled = 0;
+            g_enhanced.groundCinematicEnabled = 0;
+            g_enhanced.finisherKillSlow = 0;
+            g_enhanced.finisherFovMs = 0;
+        }
+        if (!CombatEffectEnabled(EffectHitstop)) g_enhanced.hitstopEnabled = 0;
+        if (!CombatEffectEnabled(EffectParry)) {
+            g_enhanced.parryEnabled = 0;
+            g_enhanced.riposteEnabled = 0;
+        }
+        if (!CombatEffectEnabled(EffectDodge)) g_enhanced.dodgeOffsetEnabled = 0;
     }
 }

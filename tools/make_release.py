@@ -2,14 +2,15 @@
 """make_release.py — build the end-user release zip for Nexus/GitHub.
 
 Packages ONLY mod files: the proxy DLL, default config, generated world
-levels, menu scene, per-language msglist and a README.txt. No stock game
+levels, menu scene, per-language msglist and two text guides. No stock game
 files, no runtime files (br2mod_times.ini), no dev artifacts (.TXT deps).
 
 Usage:
   python tools/make_release.py --game "H:\GOG\BloodRayne 2 Terminal Cut" ^
       --out <outdir> [--ver 1.0.0]
 """
-import argparse, os, sys, zipfile
+import argparse, os, re, sys, zipfile
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,6 +40,15 @@ Photo Mode is available from Pause or via F12 / L3+R3 in gameplay.
 Enhanced combat adds a timed parry and follow-up, hitstop, recovery
 protection, a combo counter, style ranks from D to V, and cinematic
 effects for feeding executions and dismemberment.
+If an armed enemy repels a frontal feeding attempt, tap Parry just
+before the follow-up to roll away and get up facing the enemy.
+Options > Combat Effects shows five switches when Combat is set to Enhanced.
+See COMBAT_SETTINGS.txt for a quick setup and the full INI reference.
+To Dodge Offset, dodge during a melee chain and tap blade or kick
+during the dodge or just after it. The follow-up earns style if it hits.
+Twisted Wind briefly blocks enemy melee at the start of its active kick.
+During challenge results, Esc and Start are disabled until the automatic
+return to the main menu.
 In Enhanced challenges, best time and peak style are separate records.
 Normal challenges track best time.
 
@@ -76,6 +86,15 @@ Modo Foto se abre desde Pausa o con F12 / L3+R3 en partida.
 Combate Mejorado anade parry y replica, hitstop, proteccion tras
 recibir dano, contador de combos, rangos de estilo de D a V y
 efectos de camara en ejecuciones y mutilaciones.
+Si un enemigo armado rechaza un mordisco frontal, pulsa Parry antes
+del segundo golpe para rodar hacia atras y levantarte de cara al enemigo.
+Opciones > Efectos de combate muestra cinco interruptores con Combate
+Mejorado. Consulta COMBAT_SETTINGS.txt para la guia y referencia del INI.
+Para continuar un combo con Dodge Offset, esquiva en mitad de la cadena
+y pulsa cuchilla o patada durante la esquiva o al salir. El golpe suma
+estilo si conecta. Viento retorcido bloquea brevemente el cuerpo a cuerpo
+enemigo al inicio de la patada. Durante los resultados, Esc y Start quedan
+bloqueados hasta la vuelta automatica al menu principal.
 En Desafio con Mejorado hay records separados de tiempo y estilo.
 En Normal se guarda el mejor tiempo.
 
@@ -101,6 +120,64 @@ Borra dinput8.dll y los ficheros que el zip anadio en world\\.
 Las partidas guardadas y los POD originales nunca se tocan.
 br2mod_times.ini puede borrarse para reiniciar los records de Desafio.
 """
+
+
+def combat_reference():
+    """Keep the text guide in sync with the shipped INI and parser ranges."""
+    root = Path(ROOT)
+    settings = (root / "enhanced_settings.inl").read_text(encoding="utf-8")
+    bounds = {
+        name: (lo.strip().removesuffix("f"), hi.strip().removesuffix("f"))
+        for name, lo, hi in re.findall(
+            r"\bX\((?:int|float),\s*(\w+),[^,]+,\s*([^,]+),\s*([^\n)]+)\)",
+            settings
+        )
+        if name != "trace"
+    }
+    lines = [
+        "BloodRayne 2 - Enhanced Combat Settings",
+        "=======================================",
+        "",
+        "QUICK SETUP",
+        "In Options, set Combat to Enhanced and open Combat Effects.",
+        "Turn off Finisher Cinematics and Impact Pause to remove extra finish",
+        "slowdown, zoom and hitstop while keeping the combat mechanics enabled.",
+        "",
+        "Finisher Cinematics covers combo finishers, feeding executions,",
+        "dismemberment and special strikes on live grounded targets. Native",
+        "time powers, victory slowdown and parry slowdown are separate.",
+        "Impact Pause controls hitstop on attacks dealt and received.",
+        "Parry controls the parry, the riposte and the back roll escape when an",
+        "armed enemy repels a frontal feeding attempt. Press Parry just before",
+        "the enemy's follow-up to escape. A held button does not count.",
+        "Dodge Offset controls the ability to resume a combo after dodging.",
+        "Style and Combo hides their in-game display. Scoring and results continue.",
+        "",
+        "Menu choices are saved in br2mod.ini. An off switch masks its group.",
+        "Turning it back on restores the values in br2mod_combat.ini.",
+        "The menu switches share the same challenge records.",
+        "",
+        "ADVANCED INI REFERENCE",
+        "Edit br2mod_combat.ini next to rayne2.exe. The mod reloads edits while",
+        "the game runs. The ranges below are the individual parser limits.",
+        "Time settings use milliseconds unless a comment specifies otherwise.",
+        "0/1 switches use 0 for off and 1 for on.",
+        "",
+    ]
+    seen = set()
+    for line in (root / "br2mod_combat.ini").read_text(encoding="utf-8").splitlines():
+        if line.startswith(";"):
+            lines.append(line[1:].lstrip())
+        elif match := re.fullmatch(r"(\w+)\s*=\s*(\S+)", line):
+            name, default = match.groups()
+            lo, hi = bounds[name]
+            lines.append(f"  {name} = {default}  (range {lo} to {hi})")
+            seen.add(name)
+        else:
+            lines.append(line)
+    if seen != bounds.keys():
+        raise ValueError(f"Missing shipped combat settings: {sorted(bounds.keys() - seen)}")
+    return "\n".join(lines) + "\n"
 
 
 def main():
@@ -142,7 +219,8 @@ def main():
         for src, arc in items:
             z.write(src, arc)
         z.writestr("README.txt", README_TXT)
-    print("%d files -> %s" % (len(items) + 1, zpath))
+        z.writestr("COMBAT_SETTINGS.txt", combat_reference())
+    print("%d files -> %s" % (len(items) + 2, zpath))
 
 
 if __name__ == "__main__":

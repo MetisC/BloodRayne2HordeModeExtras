@@ -25,6 +25,7 @@ BYTE __fastcall HookCinematicDetach(BYTE* target, void*, void* limb, int part, i
 DWORD __fastcall DispatchCinematicDamage(BYTE* target, BYTE* hit) {
     using ReceiveDamage = DWORD (__thiscall*)(BYTE*, BYTE*);
     const auto receive = (*(ReceiveDamage**)target)[0x3C / sizeof(DWORD)];
+    if (SuppressFeedEscapeHit(target, hit)) return 0;
     if (!EnhancedCombatActive() || (!g_enhanced.dismemberCinematicEnabled &&
         !g_enhanced.groundCinematicEnabled))
         return receive(target, hit);

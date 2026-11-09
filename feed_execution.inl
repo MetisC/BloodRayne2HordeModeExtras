@@ -173,16 +173,17 @@ const CombatAnimationEvent* __fastcall HookCombatAnimationStep(BYTE* controller,
     const bool hitstopActor = !g_enhanced.hitstopGlobal &&
         (isRayne || actor == g_hitstop.target) && HitstopActive(GetTickCount());
     const bool feedActor = isRayne && g_enhanced.feedExecutionEnabled;
-    if (!hitstopActor && !feedActor) return advance(controller, seconds);
+    const float escapeRate = isRayne ? FeedEscapeAnimationRate(rayne) : 1.0f;
+    if (!hitstopActor && !feedActor && escapeRate == 1.0f) return advance(controller, seconds);
 
     const int state = *(const int*)(rayne + 0x17C);
     const auto* cue = feedActor ? FeedCueForState(state) : NULL;
     const unsigned bit = isRayne ? 1 : 2;
     const bool alreadyScaled = (g_hitstop.sampled & bit) != 0;
-    const float rate = hitstopActor && !alreadyScaled ? HitstopRateFor(isRayne) : 1.0f;
+    const float rate = escapeRate * (hitstopActor && !alreadyScaled ? HitstopRateFor(isRayne) : 1.0f);
     const float incoming = *seconds;
     const float beforeFrame = *(const float*)(controller + 0x28);
-    if (rate < 1.0f) *seconds *= rate;
+    if (rate != 1.0f) *seconds *= rate;
 #ifdef BR2_COMBAT_TEST
     if (feedActor && g_tracedFeedState != state) {
         const auto* previous = FeedCueForState(g_tracedFeedState);
@@ -199,7 +200,7 @@ const CombatAnimationEvent* __fastcall HookCombatAnimationStep(BYTE* controller,
 #endif
     const auto* event = advance(controller, seconds);
     // Keep the remainder in the caller's units when it loops over events.
-    if (rate < 1.0f) *seconds /= rate;
+    if (rate != 1.0f) *seconds /= rate;
 #ifdef BR2_COMBAT_TEST
     if (hitstopActor && !(g_hitstop.tracedPose & bit)) {
         g_hitstop.tracedPose |= bit;
