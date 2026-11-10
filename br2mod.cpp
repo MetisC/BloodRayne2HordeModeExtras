@@ -219,6 +219,8 @@ static constexpr ModOutfit ModOutfits[] = {
      "models\\br2_dhampir_f.bfm", "data\\br2_dhampir_f.skb", "models\\br2_dhampir_f.jug"},
     {0x4252E004, "br2_ninjaf", "Ninja", "br2_ninjaf.dfm", "rayne_armor.jug",
      "models\\br2_ninjaf.bfm", nullptr, nullptr},
+    {0x4252E023, "br2_ferril", "Ferril", "br2_ferril.dfm", "br2_ferril.jug",
+     "models\\br2_ferril.bfm", "data\\br2_ferril.skb", "models\\br2_ferril.jug"},
     {0x4252E005, "br2_fpunk_female", "Punk 1", "br2_fpunk_female.dfm", "br2_fpunk_female.jug",
      "models\\br2_fpunk_female.bfm", nullptr, "models\\br2_fpunk_female.jug"},
     {0x4252E006, "br2_fpunk_female_2", "Punk 2", "br2_fpunk_female_2.dfm", "br2_fpunk_female.jug",

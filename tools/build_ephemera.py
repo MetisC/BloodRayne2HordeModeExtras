@@ -3,7 +3,7 @@
 
 import argparse
 from dataclasses import dataclass
-from math import dist, isfinite
+from math import acos, degrees, dist, isfinite, sqrt
 from pathlib import Path
 import re
 from struct import pack, pack_into, unpack_from
@@ -24,10 +24,16 @@ OUTFITS = {
     "kestral": ("br2_kestral", ("bone_l_hair", "bone_r_hair")),
     "dhampir_f": ("br2_dhampir_f", ("cape_",)),
     "ninjaf": ("br2_ninjaf", ()),
+    "ferril": ("br2_ferril", ("bone_hair", "bone_l_hair", "bone_Lhair", "bone_r_hair", "bone_Rhair")),
     "fpunk_female": ("br2_fpunk_female", ()),
     "zguest_f": ("br2_zguest_f", ("skirt_",)),
     "zpunkf": ("br2_zpunkf", ("skirt_", "hair_")),
 }
+# Donor rigs whose rest skeleton diverges too much from Rayne's to keep her
+# rest transforms. These conform the hybrid rig to the donor's rest pose.
+CONFORM_RIG = {"ferril"}
+FERRIL_DIGIT_SCALE = 0.36    # shortens digits along the bone axis only; cross-section untouched
+FERRIL_REPOSE_FINGERS = True  # include fingers in the arm-chain repose pass
 # Head, hair, torso, lower body and arms from the native FPunk selector.
 PUNK_VARIANTS = (
     ("b", "a", "a", "a", "a"),
@@ -129,6 +135,9 @@ class Model:
 def target_name(name):
     if name in ("bone_left_breast", "bone_right_breast"):
         return name.removeprefix("bone_")
+    # Rayne's rig has only two phalanges per finger, so Ferril's claw
+    # segment rides the middle phalanx.
+    name = re.sub(r" Finger(\d)2$", r" Finger\g<1>1", name)
     if " Finger4" in name:
         # Rayne has no separate pinky tracks. Let the proximal and distal
         # segments follow the corresponding ring-finger curls.
@@ -239,7 +248,7 @@ def select_visible_parts(source, skeleton, selected):
     return Model.read(result, skeleton)
 
 
-def outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes):
+def outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes, character):
     secondary = [i for i, name in enumerate(source.bones) if name.startswith(secondary_prefixes)]
     accessory_slots = [i for i, name in enumerate(rayne.bones)
                        if name.startswith(("hair_", "ring_", "ribbin_"))]
@@ -266,9 +275,6 @@ def outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes
     if missing:
         raise ValueError(f"Missing outfit physics bones: {sorted(missing)}")
 
-    if not secondary:
-        return rayne_skb, rayne.data[rayne.rig:rayne.descriptors], mapping, rayne.origins
-
     bones_end = 8 + SKB_BONE * stock_count
     skeleton = bytearray(rayne_skb[:bones_end] + bytes(SKB_BONE * extra_count) + rayne_skb[bones_end:])
     pack_into("<I", skeleton, 4, count)
@@ -280,6 +286,26 @@ def outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes
         rig += rayne.data[cursor:end] + bytes(stride * extra_count)
         cursor = end
     source_count = len(source.bones)
+    if character in CONFORM_RIG:
+        # This donor's rest skeleton diverges from Rayne's too much to keep
+        # her rest transforms. Each target bone takes its rest position and
+        # orientation from the donor bone of the exact same name; hierarchy,
+        # flags and linkage stay Rayne's. Donor bones only reachable through
+        # a target_name remap contribute nothing.
+        source_indices = {name: i for i, name in enumerate(source.bones)}
+        for target_id in range(stock_count):
+            source_id = source_indices.get(names[target_id])
+            if source_id is None:
+                continue
+            rig[12 * target_id:12 * target_id + 12] = \
+                source.data[source.rig + 12 * source_id:source.rig + 12 * source_id + 12]
+            rig[12 * count + 24 * target_id:12 * count + 24 * target_id + 24] = \
+                source.data[source.rig + 12 * source_count + 24 * source_id:
+                            source.rig + 12 * source_count + 24 * source_id + 24]
+    origins = bone_origins(skeleton, rig, count)
+    if not secondary:
+        return skeleton, rig, mapping, origins
+
     head = target_indices["Bip01 Head"]
     source_head = source.bones.index("Bip01 Head")
     for source_id in secondary:
@@ -291,7 +317,7 @@ def outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes
         pack_into("<ii", skeleton, new + 28, mapping[parent], mapping[mirror] if mirror >= 0 else -1)
         delta = unpack_from("<3f", source.data, source.rig + 12 * source_id)
         if parent not in secondary:
-            delta = tuple(a - b for a, b in zip(source.origins[source_id], rayne.origins[mapping[parent]]))
+            delta = tuple(a - b for a, b in zip(source.origins[source_id], origins[mapping[parent]]))
         pack_into("<3f", rig, 12 * target_id, *delta)
         for stride, size in ((12, 24), (36, 4)):
             old = source.rig + stride * source_count + size * source_id
@@ -321,7 +347,9 @@ def outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes
 
 def rebind(source, rayne, source_skb, rayne_skb, physics, character):
     outfit, secondary_prefixes = OUTFITS[character]
-    skeleton, rig, mapping, origins = outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes)
+    if character in CONFORM_RIG:
+        source = reshape_donor(source, source_skb, rayne, rayne_skb)
+    skeleton, rig, mapping, origins = outfit_rig(source, source_skb, rayne, rayne_skb, physics, secondary_prefixes, character)
     bone_count = len(origins)
     header_and_parts = bytearray(source.data[:source.attachments])
     attachment_data = rayne.data[rayne.attachments:rayne.attachments + 4 * ATTACHMENT]
@@ -398,11 +426,308 @@ def rebind(source, rayne, source_skb, rayne_skb, physics, character):
         output += packet
         vertex_count += vertices
 
+    if character in CONFORM_RIG:
+        # The 24-byte per-bone block is an AABB (min/max) over that bone's
+        # influence offsets. The donor's blocks no longer match after the
+        # repose and reshaping, so rebuild them on the final packets.
+        rig_start = len(header_and_parts) + len(attachment_data) + len(materials)
+        boxes = {}
+        cursor = len(output) - sum(size for _, size, _ in source.meshes)
+        for _, size, vertices in source.meshes:
+            for i in range(vertices):
+                start = cursor + i * VERTEX
+                slots = unpack_from("<I", output, start)[0]
+                weights = unpack_from("<4f", output, start + 52)
+                indices = unpack_from("<4I", output, start + 80)
+                for slot in range(slots):
+                    if weights[slot] == 0:
+                        continue
+                    local = unpack_from("<3f", output, start + 4 + 12 * slot)
+                    box = boxes.setdefault(indices[slot],
+                                           [float("inf")] * 3 + [float("-inf")] * 3)
+                    for axis in range(3):
+                        box[axis] = min(box[axis], local[axis])
+                        box[3 + axis] = max(box[3 + axis], local[axis])
+            cursor += size
+        for bone, box in boxes.items():
+            pack_into("<6f", output, rig_start + 12 * bone_count + 24 * bone, *box)
+
     rebuilt = Model.read(output, skeleton)
     if rebuilt.parts != source.parts or max_error > 0.00001:
         raise ValueError(f"Neutral shape changed by {max_error:.8f}")
     print(f"Rebound {vertex_count} vertices across {source.parts} parts. Neutral error {max_error:.8f}.")
     return output, skeleton
+
+
+def repose_donor(source, source_skb, rayne, rayne_skb):
+    """Re-pose the donor's arm chains onto Rayne's rest frames.
+
+    The 9 floats at SKB record+36 are a 3x3 matrix whose columns are the
+    bone's rest axes in world space; column 2 points along the bone toward
+    its child. Rayne's animation tracks are authored against her own rest
+    frames, so each arm bone b gets Q_b = M_rayne(ref(b)) * M_ferril(b)^T:
+    child deltas rotate by their parent's Q, and the vertex offsets and
+    normal/tangent/binormal vectors weighted to b rotate by Q_b. Bones
+    outside the arm set keep identity Q, so only the arms move.
+    """
+    data = bytearray(source.data)
+    count = len(source.bones)
+    name_index = {name: i for i, name in enumerate(source.bones)}
+    rayne_index = {name: i for i, name in enumerate(rayne.bones)}
+    parents = [unpack_from("<i", source_skb, 36 + SKB_BONE * i)[0] for i in range(count)]
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+    def dot(a, b):
+        return sum(x * y for x, y in zip(a, b))
+
+    def norm(v):
+        return sqrt(dot(v, v))
+
+    def normalize(v):
+        length = norm(v) or 1.0
+        return tuple(x / length for x in v)
+
+    def columns(skb, i):
+        m = unpack_from("<9f", skb, 44 + SKB_BONE * i)
+        return [(m[c], m[3 + c], m[6 + c]) for c in range(3)]
+
+    def orthogonalized(skb, i):
+        # Anchor column 2, orthogonalize column 1 against it, column 0 = cross.
+        c1, c2 = columns(skb, i)[1:3]
+        c2 = normalize(c2)
+        d = dot(c1, c2)
+        c1 = normalize(tuple(a - d * b for a, b in zip(c1, c2)))
+        c0 = (c1[1] * c2[2] - c1[2] * c2[1],
+              c1[2] * c2[0] - c1[0] * c2[2],
+              c1[0] * c2[1] - c1[1] * c2[0])
+        return c0, c1, c2
+
+    def rotation(f_cols, r_cols):
+        # Q = M_rayne * M_ferril^T, given as row-major from column triples.
+        return [[sum(r_cols[k][r] * f_cols[k][c] for k in range(3))
+                 for c in range(3)] for r in range(3)]
+
+    def mat_vec(m, v):
+        return tuple(sum(m[r][k] * v[k] for k in range(3)) for r in range(3))
+
+    def det3(m):
+        return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+
+    repose = set()
+    for side in "LR":
+        for part in ("Clavicle", "UpperArm", "Forearm", "Hand"):
+            repose.add(f"Bip01 {side} {part}")
+        if FERRIL_REPOSE_FINGERS:
+            for n in range(5):
+                for segment in ("", "1", "2"):
+                    repose.add(f"Bip01 {side} Finger{n}{segment}")
+    missing = repose.difference(name_index)
+    if missing:
+        raise ValueError(f"Missing repose bones: {sorted(missing)}")
+
+    tip = re.compile(r"Bip01 [LR] Finger[0-4]2$")
+    quats = {}
+    for i in sorted(name_index[name] for name in repose):
+        name = source.bones[i]
+        if tip.fullmatch(name):
+            continue  # the claw segment follows the middle phalanx rigidly
+        ref = name if name in rayne_index else name.replace("Finger4", "Finger3")
+        if ref not in rayne_index:
+            raise ValueError(f"No Rayne repose reference for {name}")
+        f_cols = orthogonalized(source_skb, i)
+        r_cols = orthogonalized(rayne_skb, rayne_index[ref])
+        q = rotation(f_cols, r_cols)
+        qtq = [[sum(q[r][k] * q[c][k] for k in range(3)) for c in range(3)]
+               for r in range(3)]
+        if abs(det3(q) - 1.0) > 1e-5 or max(
+                abs(qtq[r][c] - (r == c)) for r in range(3) for c in range(3)) > 1e-5:
+            raise ValueError(f"Repose rotation for {name} is not orthonormal")
+        if name in rayne_index:
+            mapped = mat_vec(q, f_cols[2])
+            angle = degrees(acos(min(1.0, max(-1.0, dot(mapped, r_cols[2])))))
+            if angle > 0.05:
+                raise ValueError(f"Repose rotation for {name} misses the child axis by {angle:.4f} deg")
+        quats[i] = q
+    for i in sorted(name_index[name] for name in repose):
+        name = source.bones[i]
+        if tip.fullmatch(name):
+            quats[i] = quats[name_index[name[:-1] + "1"]]
+
+    # Rigid carry: every child delta rotates by its parent's rotation.
+    for i in range(count):
+        parent = parents[i]
+        if parent < 0 or parent not in quats:
+            continue
+        delta = unpack_from("<3f", data, source.rig + 12 * i)
+        pack_into("<3f", data, source.rig + 12 * i, *mat_vec(quats[parent], delta))
+
+    # Vertex offsets rotate about their bone origin; the three rest-space
+    # vectors rotate as a weight-blended linear repose.
+    cursor = source.geometry
+    for _, size, vertices in source.meshes:
+        for i in range(vertices):
+            start = cursor + i * VERTEX
+            slots = unpack_from("<I", data, start)[0]
+            weights = unpack_from("<4f", data, start + 52)
+            indices = unpack_from("<4I", data, start + 80)
+            if not any(indices[slot] in quats for slot in range(slots) if weights[slot] != 0):
+                continue
+            for slot in range(slots):
+                if weights[slot] == 0 or indices[slot] not in quats:
+                    continue
+                local = unpack_from("<3f", data, start + 4 + 12 * slot)
+                pack_into("<3f", data, start + 4 + 12 * slot, *mat_vec(quats[indices[slot]], local))
+            for vector in (68, 104, 116):
+                v = unpack_from("<3f", data, start + vector)
+                if abs(norm(v) - 1.0) > 0.01:
+                    continue  # degenerate vectors stay as authored
+                blended = [0.0, 0.0, 0.0]
+                for slot in range(slots):
+                    if weights[slot] == 0:
+                        continue
+                    rotated = mat_vec(quats.get(indices[slot], identity), v)
+                    for axis in range(3):
+                        blended[axis] += weights[slot] * rotated[axis]
+                if norm(blended) > 0.001:
+                    pack_into("<3f", data, start + vector, *normalize(blended))
+        cursor += size
+    return Model.read(bytes(data), source_skb)
+
+
+def reshape_donor(source, source_skb, rayne, rayne_skb):
+    """Correct a donor model's proportions before rebinding.
+
+    Ferril matches Rayne within ±5% everywhere except a digitigrade foot and
+    claw-length fingers, so there is no global scale. Instead: drop the root
+    so her pelvis sits at Rayne's rest height, shrink the foot about the
+    ankle until she is grounded again, and shorten each phalanx along its
+    own bone axis so the digits keep their authored thickness. Bone deltas
+    and per-influence vertex offsets are the only position data touched;
+    the 24-byte local bounds over-cover the shrunk parts, which is harmless.
+    """
+    source = repose_donor(source, source_skb, rayne, rayne_skb)
+    data = bytearray(source.data)
+    count = len(source.bones)
+    name_index = {name: i for i, name in enumerate(source.bones)}
+    parents = [unpack_from("<i", source_skb, 36 + SKB_BONE * i)[0] for i in range(count)]
+
+    def scale_floats(offset, size, factor):
+        values = unpack_from(f"<{size // 4}f", data, offset)
+        pack_into(f"<{size // 4}f", data, offset, *(value * factor for value in values))
+
+    def sub(a, b):
+        return tuple(x - y for x, y in zip(a, b))
+
+    def normalize(v):
+        length = dist(v, (0.0, 0.0, 0.0)) or 1.0
+        return tuple(x / length for x in v)
+
+    def vertex_positions(model):
+        cursor = model.geometry
+        for mesh_index, (_, size, vertices) in enumerate(model.meshes):
+            for i in range(vertices):
+                start = cursor + i * VERTEX
+                slots = unpack_from("<I", model.data, start)[0]
+                weights = unpack_from("<4f", model.data, start + 52)
+                indices = unpack_from("<4I", model.data, start + 80)
+                pos = [0.0, 0.0, 0.0]
+                for slot in range(slots):
+                    if weights[slot] == 0:
+                        continue
+                    local = unpack_from("<3f", model.data, start + 4 + 12 * slot)
+                    for axis in range(3):
+                        pos[axis] += (local[axis] + model.origins[indices[slot]][axis]) * weights[slot]
+                yield mesh_index, pos
+            cursor += size
+
+    def mesh_parts(model):
+        parts = []
+        cursor = model.descriptors + 4
+        for _ in model.meshes:
+            _, _, part_count = unpack_from("<3I", model.data, cursor)
+            parts.append(set(unpack_from(f"<{part_count}H", model.data, cursor + 12)))
+            cursor += 12 + part_count * 2
+            adjacent = unpack_from("<I", model.data, cursor)[0]
+            cursor += 4 + adjacent * 2 + 24
+        return parts
+
+    # Drop the root so the pelvis sits at Rayne's rest height. The pelvis is
+    # the root, so its delta is the rig's world offset and the vertices,
+    # stored as offsets from bone origins, follow for free.
+    pelvis = name_index["Bip01 Pelvis"]
+    drop = source.origins[pelvis][1] - rayne.origins[rayne.bones.index("Bip01 Pelvis")][1]
+    delta_x, delta_y, delta_z = unpack_from("<3f", data, source.rig + 12 * pelvis)
+    pack_into("<3f", data, source.rig + 12 * pelvis, delta_x, delta_y - drop, delta_z)
+
+    # Shrink the digitigrade foot about the ankle so the lowest foot vertex
+    # lands where Rayne's does. Toe0 and everything below it get the scaled
+    # delta; the ankle itself is the pivot and stays.
+    foot_part_ids = {i for i in range(source.parts)
+                     if name_at(source.data, HEADER + i * PART, 30)
+                     in ("part_lfoot", "part_rfoot")}
+    parts = mesh_parts(source)
+    lowest = min(pos[1] for mesh_index, pos in vertex_positions(source)
+                 if parts[mesh_index] & foot_part_ids)
+    ankles = (name_index["Bip01 L Foot"], name_index["Bip01 R Foot"])
+    ankle_y = sum(source.origins[i][1] for i in ankles) / len(ankles)
+    ground = min(pos[1] for _, pos in vertex_positions(rayne))
+    foot_scale = (ground - (ankle_y - drop)) / (lowest - ankle_y)
+    if not 0.60 < foot_scale < 0.66:
+        raise ValueError(f"Unexpected Ferril foot scale {foot_scale:.4f}")
+    below_ankle = {i for i, name in enumerate(source.bones)
+                   if re.fullmatch(r"Bip01 [LR] Toe0", name)}
+    changed = True
+    while changed:
+        changed = False
+        for i in range(count):
+            if i not in below_ankle and parents[i] in below_ankle:
+                below_ankle.add(i)
+                changed = True
+    foot_bones = set(ankles) | below_ankle
+    for i in below_ankle:
+        scale_floats(source.rig + 12 * i, 12, foot_scale)
+
+    # Shorten each phalanx along its own axis so the digits stay as thick as
+    # authored. Finger{n}2 is a leaf and reuses its parent segment's axis.
+    digit = {i for i, name in enumerate(source.bones)
+             if re.fullmatch(r"Bip01 [LR] Finger[0-4][12]?", name)}
+    if len(digit) != 30:
+        raise ValueError("Unexpected Ferril digit rig")
+    digit_axes = {}
+    for i in digit:
+        name = source.bones[i]
+        if not re.fullmatch(r"Bip01 [LR] Finger[0-4]", name):
+            continue
+        middle, tip = name_index[name + "1"], name_index[name + "2"]
+        digit_axes[i] = normalize(sub(source.origins[middle], source.origins[i]))
+        digit_axes[middle] = digit_axes[tip] = normalize(sub(source.origins[tip], source.origins[middle]))
+    for i in digit:
+        if re.fullmatch(r"Bip01 [LR] Finger[0-4][12]", source.bones[i]):
+            scale_floats(source.rig + 12 * i, 12, FERRIL_DIGIT_SCALE)
+
+    # Foot slots scale isotropically; digit slots keep their perpendicular
+    # component and rescale only the part along the bone axis.
+    cursor = source.geometry
+    for _, size, vertices in source.meshes:
+        for i in range(vertices):
+            start = cursor + i * VERTEX
+            slots = unpack_from("<I", data, start)[0]
+            indices = unpack_from("<4I", data, start + 80)
+            for slot in range(slots):
+                bone = indices[slot]
+                if bone in foot_bones:
+                    scale_floats(start + 4 + 12 * slot, 12, foot_scale)
+                elif bone in digit_axes:
+                    local = unpack_from("<3f", data, start + 4 + 12 * slot)
+                    axis = digit_axes[bone]
+                    along = sum(a * b for a, b in zip(local, axis))
+                    pack_into("<3f", data, start + 4 + 12 * slot,
+                              *(x + (FERRIL_DIGIT_SCALE - 1.0) * along * a
+                                for x, a in zip(local, axis)))
+        cursor += size
+    return Model.read(bytes(data), source_skb)
 
 
 def dampen_cape(physics):
@@ -478,9 +803,10 @@ def main():
         models_to_bind = numbered_outfit_models(outfit, source, source_skb, select_ballroom_guest, BALLROOM_VARIANTS)
     else:
         physics = get(common, fr"MODELS\{physics_name}.JUG")
+    if args.character in ("ferril", "fpunk_female"):
+        physics = physics.replace(b"bone_left_breast", b"left_breast").replace(b"bone_right_breast", b"right_breast")
     if args.character == "fpunk_female":
         models_to_bind = numbered_outfit_models(outfit, source, source_skb, select_punk_variant, PUNK_VARIANTS)
-        physics = physics.replace(b"bone_left_breast", b"left_breast").replace(b"bone_right_breast", b"right_breast")
     elif args.character == "zpunkf":
         models_to_bind = numbered_outfit_models(outfit, source, source_skb, select_zerenski_assassin, ZERENSKI_VARIANTS)
     args.out.mkdir(parents=True, exist_ok=True)
@@ -492,7 +818,7 @@ def main():
             assets.append((f"{name}.SKB", skeleton))
     if args.character == "dhampir_f":
         assets.append((f"{outfit}.JUG", dampen_cape(physics)))
-    elif args.character in ("fpunk_female", "zguest_f"):
+    elif args.character in ("ferril", "fpunk_female", "zguest_f"):
         assets.append((f"{outfit}.JUG", physics))
     for name, data in assets:
         path = args.out / name.upper()
