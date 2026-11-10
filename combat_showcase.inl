@@ -347,7 +347,11 @@ bool ShowcaseConfirmedHit(BYTE* rayne, BYTE* victim, const BYTE* hit, int type, 
         return false;
     }
 
-    const bool finisher = g_enhanced.finisherEnabled && ShowcaseFinisherState(state) &&
+    const bool finisherMove = rayne == g_ferrilContactActor
+        ? ((BYTE (__thiscall*)(BYTE*, const char*))0x6061B0)(rayne + 0x158, "ferrilfinish") != 0 &&
+          ((state != 0x2E && state != 0x2F) || g_enhanced.finisherCircle != 0)
+        : ShowcaseFinisherState(state);
+    const bool finisher = g_enhanced.finisherEnabled && finisherMove &&
         (!g_showcasePulse.started ||
          now - g_showcasePulse.at >= (DWORD)g_enhanced.finisherCooldownMs);
     if (!finisher && !riposte) return false;

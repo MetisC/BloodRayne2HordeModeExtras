@@ -77,7 +77,7 @@ void __declspec(naked) HookCinematicCollision() {
 void __declspec(naked) HookCinematicKick() {
     __asm {
         mov edx, edi
-        jmp DispatchCinematicDamage
+        jmp FerrilMeleeDamage
     }
 }
 

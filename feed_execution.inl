@@ -4,6 +4,11 @@ struct FeedExecutionCue {
     float frame;
 };
 constexpr int FeedHeadStomp = 10;
+constexpr int FeedRearKickFlipState = 0xFB;
+constexpr int FeedRearKickFlip = 9;
+// BITE_BEHIND_KICK.ANI: let Rayne settle into the landing pose.
+constexpr float FeedRearKickFlipSlowFrame = 50.5f;
+constexpr float FeedRearKickFlipTiltDeg = 4.0f;
 constexpr FeedExecutionCue FeedExecutionCues[] = {
     {0xE9, 0x644, 1, 16},  // front throw
     {0xEB, 0x641, 2, 65},  // synchronized with the victim's head cut
@@ -14,7 +19,7 @@ constexpr FeedExecutionCue FeedExecutionCues[] = {
     {0xF8, 0x644, 6, 15},  // alternate rear release clip
     {0xF9, 0,     7, 39},  // final torso split on the paired victim clip
     {0xFA, 0x517, 8, 35},  // second blade extends into the spin
-    {0xFB, 0,     9, 36},  // let the native release at frame 32 finish first
+    {FeedRearKickFlipState, 0, FeedRearKickFlip, 36}, // start zoom after the native release at frame 32
     {0xFC, 0x64A, FeedHeadStomp, 38}, // rear head stomp (fatal_headstomp)
 };
 
@@ -24,10 +29,13 @@ const FeedExecutionCue* FeedCueForState(int state) {
     return NULL;
 }
 
+enum class FeedSlowPhase { Playing, WaitingForPose, Skipped };
+
 struct FeedExecutionPulse {
     DWORD at;
     int number;
     LARGE_INTEGER cameraAt;
+    FeedSlowPhase slowPhase = FeedSlowPhase::Playing;
 #ifdef BR2_COMBAT_TEST
     bool tracedWorld, tracedFov;
 #endif
@@ -89,14 +97,20 @@ float FeedExecutionCameraAge() {
 
 float FeedExecutionWorldRate(DWORD now) {
     if (!FeedExecutionActive()) return 1.0f;
+    if (g_feedExecution.slowPhase == FeedSlowPhase::WaitingForPose) {
+        const auto* rayne = *(const BYTE**)RayneActor;
+        if (*(const int*)(rayne + 0x17C) == FeedRearKickFlipState) return 1.0f;
+        g_feedExecution.slowPhase = FeedSlowPhase::Skipped;
+    }
     const DWORD age = now - g_feedExecution.at;
     const DWORD hold = FeedExecutionSlowHold(), fade = g_enhanced.feedExecutionSlowFadeMs;
-    if (age >= hold + fade && FeedExecutionCameraAge() >= FeedExecutionCameraDuration()) {
-        LogParry("feed-execution-end", age, g_feedExecution.number);
-        g_feedExecution = {};
+    if (g_feedExecution.slowPhase == FeedSlowPhase::Skipped || age >= hold + fade) {
+        if (FeedExecutionCameraAge() >= FeedExecutionCameraDuration()) {
+            LogParry("feed-execution-end", age, g_feedExecution.number);
+            g_feedExecution = {};
+        }
         return 1.0f;
     }
-    if (age >= hold + fade) return 1.0f;
     const float rate = age < hold ? g_enhanced.feedExecutionSlowRate :
         g_enhanced.feedExecutionSlowRate + (1.0f - g_enhanced.feedExecutionSlowRate) * (age - hold) / fade;
 #ifdef BR2_COMBAT_TEST
@@ -121,16 +135,19 @@ float FeedExecutionCameraFov(float fov, float& pitch) {
     const float amount = FeedExecutionZoomWeight(age, g_enhanced.feedExecutionFovInMs,
         g_enhanced.feedExecutionFovHoldMs, g_enhanced.feedExecutionFovFadeMs);
     const float adjusted = fov * (1.0f + (g_enhanced.feedExecutionFov - 1.0f) * amount);
-    const float tilt = g_feedExecution.number == FeedHeadStomp ?
-        g_enhanced.feedHeadStompTiltDeg * 0.01745329252f * amount : 0.0f;
+    const bool headStomp = g_feedExecution.number == FeedHeadStomp;
+    float tiltDeg = 0.0f;
+    if (headStomp) tiltDeg = g_enhanced.feedHeadStompTiltDeg;
+    else if (g_feedExecution.number == FeedRearKickFlip) tiltDeg = FeedRearKickFlipTiltDeg;
+    const float tilt = tiltDeg * 0.01745329252f * amount;
     pitch += tilt; // Positive pitch points down in the render camera.
 #ifdef BR2_COMBAT_TEST
     if ((adjusted != fov || tilt != 0.0f) && !g_feedExecution.tracedFov) {
         g_feedExecution.tracedFov = true;
         LogParry("feed-execution-camera", (DWORD)age, g_feedExecution.number, 0, 0, 0, 0, NULL, NULL, 0, fov, adjusted, amount);
         if (tilt != 0.0f)
-            LogParry("feed-head-stomp-framing", (DWORD)age, g_feedExecution.number, 0, 0, 0,
-                     0, NULL, NULL, 0, g_enhanced.feedHeadStompTiltDeg, tilt, amount);
+            LogParry(headStomp ? "feed-head-stomp-framing" : "feed-kickflip-framing",
+                     (DWORD)age, g_feedExecution.number, 0, 0, 0, 0, NULL, NULL, 0, tiltDeg, tilt, amount);
     }
 #endif
     return adjusted;
@@ -158,6 +175,8 @@ void StartFeedExecution(BYTE* rayne, const FeedExecutionCue& cue, float frame) {
         return;
     }
     BeginCombatCinematic(cue.number);
+    if (cue.state == FeedRearKickFlipState)
+        g_feedExecution.slowPhase = FeedSlowPhase::WaitingForPose;
     LogParry("feed-execution-start", FeedExecutionSlowHold(), cue.number, 0, cue.state, 0,
              0, victim, rayne, cue.event, frame, g_enhanced.feedExecutionSlowRate,
              g_enhanced.feedExecutionFov, cue.event ? "native-event" : "paired-clip-frame");
@@ -217,6 +236,15 @@ const CombatAnimationEvent* __fastcall HookCombatAnimationStep(BYTE* controller,
         } else if (*(const int*)(controller + 0x24) == state && beforeFrame < cue->frame &&
                    *(const float*)(controller + 0x28) >= cue->frame) {
             StartFeedExecution(rayne, *cue, cue->frame);
+        }
+        if (state == FeedRearKickFlipState && g_feedExecution.slowPhase == FeedSlowPhase::WaitingForPose &&
+            *(const int*)(controller + 0x24) == state && beforeFrame < FeedRearKickFlipSlowFrame &&
+            *(const float*)(controller + 0x28) >= FeedRearKickFlipSlowFrame && FeedExecutionActive()) {
+            const DWORD now = GetTickCount();
+            LogParry("feed-kickflip-pose", now - g_feedExecution.at, cue->number, 0, state, 0,
+                     0, NULL, rayne, 0, *(const float*)(controller + 0x28));
+            g_feedExecution.at = now;
+            g_feedExecution.slowPhase = FeedSlowPhase::Playing;
         }
     }
     return event;

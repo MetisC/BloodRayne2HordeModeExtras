@@ -99,6 +99,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_BACK           0x11C
 #define AC_SKIN           0x11D
 #define AC_PHOTO          0x11E
+#define AC_CHARACTER      0x11F
 #define AC_EXTRA_BASE     0x120    // 0x120.. extra launches
 #define AC_ARENA_BASE     0x130    // 0x130.. arena launches at selected count
 #define AC_SKIN_PICK_BASE 0x140    // 0x140.. skin list picks
@@ -467,6 +468,41 @@ static int TrackIndexOf(const char* lvl) {
         if (!_stricmp(base, LevelBasename(TRACK_LVLS[i]))) return i;
     return -1;
 }
+
+enum ChallengeCharacter { ChallengeRayne, ChallengeFerril };
+static volatile LONG g_character = ChallengeRayne;
+static ChallengeCharacter g_activeCharacter = ChallengeRayne;
+static int g_characterTrack = -1;
+static bool g_ferrilAvailable;
+static BYTE* g_ferrilContactActor;
+static DWORD g_ferrilContactId;
+static int g_ferrilContactBone = -1;
+static DWORD __fastcall FerrilMeleeDamage(BYTE* target, BYTE* hit);
+static void TickFerrilInput(BYTE* actor, const BYTE* game);
+
+static ChallengeCharacter ActiveChallengeCharacter() {
+    if (g_characterTrack >= 0 &&
+        !_stricmp(LevelBasename((const char*)G_CURRENT_LEVEL), TRACK_LVLS[g_characterTrack]))
+        return g_activeCharacter;
+    return ChallengeRayne;
+}
+
+static bool FerrilChallengeActive() {
+    return ActiveChallengeCharacter() == ChallengeFerril;
+}
+
+static unsigned int __cdecl GetChallengeOutfitIndex() {
+    return FerrilChallengeActive() ? 0 : ForceOutfitIndex();
+}
+
+static const char* __cdecl GetChallengePlayerModel() {
+    return FerrilChallengeActive() ? "br2_ferril_player.dfm" : GetPlayerOutfitModel();
+}
+
+static const char* __cdecl GetChallengePlayerPhysics() {
+    return FerrilChallengeActive() ? "ferril.jug" : GetPlayerOutfitPhysics();
+}
+
 static const Entry EXTRA[] = {
     { "Story Mode",       "hub5.lvl" },
     { "Combat Mode",      "0combat.lvl" },
@@ -541,6 +577,7 @@ static int __cdecl FinishStandaloneSession() {
     *(char*)0x6030408 = 0;
     *(char*)0x5E335BD = 0;
     g_challengeSession = false;
+    g_characterTrack = -1;
     return 1;
 }
 // Native race fix: the per-frame tracked-target updater at 0x66EE90 reloads
@@ -638,6 +675,7 @@ static const ModLoc MODL[] = {
  {"Challenge Completed", {"Challenge Completed","D\xE9""fi termin\xE9","Sfida completata","Desaf\xEDo completado","Herausforderung gemeistert",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5 \xEF\xF0\xEE\xE9\xE4\xE5\xED\xEE"}},
  {"Enemies", {"Enemies","Ennemis","Nemici","Enemigos","Gegner",0,"\xC2\xF0\xE0\xE3\xE8"}},
  {"Mod Guns", {"Guns","Armes \xE0 feu","Pistole","Pistolas","Schusswaffen",0,"\xCF\xE8\xF1\xF2\xEE\xEB\xE5\xF2\xFB"}},
+ {"Challenge Character", {"Character","Personnage","Personaggio","Personaje","Figur",0,"\xCF\xE5\xF0\xF1\xEE\xED\xE0\xE6"}},
  {"Challenge Bars", {"Health and Rage","Vie et rage","Vita e furia","Vida y furia","Leben und Wut",0,"\xC7\xE4\xEE\xF0\xEE\xE2\xFC\xE5 \xE8 \xFF\xF0\xEE\xF1\xF2\xFC"}},
  {"Challenge Bars Base", {"Base","Base","Base","Base","Basis",0,"\xC1\xE0\xE7\xE0"}},
  {"Challenge Bars Maximum", {"Maximum","Maximales","Massime","M\xE1ximas","Maximal",0,"\xCC\xE0\xEA\xF1\xE8\xEC\xF3\xEC"}},
@@ -744,12 +782,16 @@ static void __declspec(naked) HookChallengePause() {
 
 #include "parry.inl"
 #include "enhanced_combat.inl"
+#include "ferril_player.inl"
 
 static int ChallengeBarsRank(int bars) {
     return bars == BarsMaximum ? 10 : 0;
 }
 
 static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
+    g_ferrilAttack = {};
+    g_ferrilSpecialHeld = false;
+    g_ferrilSpecialCooldown = 0.0f;
     ((void (__thiscall*)(void*, int))0x4F5640)(game, flag);
     ResetParry();
     ResetCombatIncoming();
@@ -814,12 +856,13 @@ static void TimeKey(const char* lvl, char* out) {
     out[n] = 0;
 }
 static void TimeSection(int difficulty, int bars, int combat, unsigned long long profile,
-                        char (&out)[96]) {
+                        char (&out)[96], bool ferril = false) {
     const char* capacity = bars == BarsMaximum ? "Max" : "Base";
+    const char* character = ferril ? "_Ferril_v2" : "";
     if (combat == CombatEnhanced)
-        sprintf_s(out, "Times_v4_%s_Bars%s_Enhanced_%016llX", PRESETS[difficulty].name, capacity, profile);
+        sprintf_s(out, "Times_v4_%s_Bars%s_Enhanced_%016llX%s", PRESETS[difficulty].name, capacity, profile, character);
     else
-        sprintf_s(out, "Times_v2_%s_Bars%s", PRESETS[difficulty].name, capacity);
+        sprintf_s(out, "Times_v2_%s_Bars%s%s", PRESETS[difficulty].name, capacity, character);
 }
 static void LoadBestTimes() {
     char key[64], sec[96];
@@ -841,12 +884,13 @@ struct ChallengeRecords {
 enum ChallengeRecordFlags { RecordTime = 1, RecordStyle = 2 };
 
 static ChallengeRecords ReadChallengeRecords(int idx, int difficulty, int bars, int combat,
-                                             unsigned long long profile) {
+                                             unsigned long long profile, bool ferril) {
     if (idx < 0 || idx >= NUM_TRACKS) return {};
-    if (combat == CombatNormal) return {g_bestTimes[idx][difficulty][bars]};
+    if (combat == CombatNormal && !ferril) return {g_bestTimes[idx][difficulty][bars]};
     char key[64], sec[96];
     TimeKey(TRACK_LVLS[idx], key);
-    TimeSection(difficulty, bars, combat, profile, sec);
+    TimeSection(difficulty, bars, combat, profile, sec, ferril);
+    if (combat == CombatNormal) return {GetPrivateProfileIntA(sec, key, 0, TIMES_FILE)};
     char value[64];
     GetPrivateProfileStringA(sec, key, "", value, sizeof value, TIMES_FILE);
     ChallengeRecords records{};
@@ -866,7 +910,8 @@ static int SaveChallengeRecords(int idx, DWORD ms, int style) {
     if (!ms) return 0;
     const bool enhanced = g_runCombat == CombatEnhanced;
     const int difficulty = enhanced ? g_runDifficulty : g_diff;
-    auto records = ReadChallengeRecords(idx, difficulty, g_runBars, g_runCombat, g_runCombatProfile);
+    const bool ferril = FerrilChallengeActive();
+    auto records = ReadChallengeRecords(idx, difficulty, g_runBars, g_runCombat, g_runCombatProfile, ferril);
     int flags = 0;
     if (!records.bestTime || ms < records.bestTime || (ms == records.bestTime && style > records.styleAtBestTime)) {
         records.bestTime = ms;
@@ -887,12 +932,12 @@ static int SaveChallengeRecords(int idx, DWORD ms, int style) {
                   records.bestStyle, records.timeAtBestStyle);
     else
         sprintf_s(val, "%lu", records.bestTime);
-    TimeSection(difficulty, g_runBars, g_runCombat, g_runCombatProfile, sec);
+    TimeSection(difficulty, g_runBars, g_runCombat, g_runCombatProfile, sec, ferril);
     if (!WritePrivateProfileStringA(sec, key, val, TIMES_FILE)) {
         LogParry("record-write-failed", ms, flags, 0, style);
         return 0;
     }
-    if (!enhanced) g_bestTimes[idx][difficulty][g_runBars] = ms;
+    if (!enhanced && !ferril) g_bestTimes[idx][difficulty][g_runBars] = ms;
     LogParry("record-saved", ms, flags, 0, style, 0, 0, NULL, NULL, 0,
              (float)records.bestTime, (float)records.bestStyle, (float)records.timeAtBestStyle);
     return flags;
@@ -1117,7 +1162,7 @@ static void __cdecl HudTick() {
     if (g_runArmed && !g_runDone && !menuOpen && gso &&
         IsStandaloneChallengeLevel(lvl))
         g_runAccum += *(float*)(gso + 0x3D8);
-    if (!menuOpen) ApplySkinForce();
+    if (!menuOpen && !FerrilChallengeActive()) ApplySkinForce();
     if (!IsStandaloneChallengeLevel(lvl)) return;
     if (menuOpen) return;
     if (!gso) return;
@@ -1305,6 +1350,7 @@ static void __cdecl OnMenuBuilt() {
         AddPhotoMenuItem();
         break;
     case MENU_MAIN: {
+        g_characterTrack = -1;
         AddMenuItem(ModLocalize("Challenge Mode"), AC_CHALLENGE_MENU, 0);
         // mover nuestro item ANTES de "Extras": items [NG,Load,Opt,Ext,Quit,CH]
         // -> shift [n-3..n-2] (Extras,Quit) una posicion abajo, CH a n-3
@@ -1400,6 +1446,10 @@ static int g_countSel = 1;      // COUNTS index shown on the cycler (25 default)
 static int g_guns = 0;          // 0 = blades only, 1 = bloodguns too
 static volatile LONG g_chalDirty = 0;  // [Challenge] options need flushing
 
+static bool FerrilSelected() {
+    return g_ferrilAvailable && g_character == ChallengeFerril;
+}
+
 static void FormatBest(DWORD best, char* tb) {
     if (best) sprintf(tb, "%u'%02u'%02u", best / 60000u,
                       (best / 1000u) % 60u, (best / 10u) % 100u);
@@ -1408,6 +1458,8 @@ static void FormatBest(DWORD best, char* tb) {
 
 static void BuildChallengeMenu() {
     int i;
+    const bool ferril = FerrilSelected();
+    const int guns = ferril ? 0 : g_guns;
     *(int*)G_ITEM_COUNT = 0;
     // Label buffer inside a menu item is 72 bytes: keep texts under it.
     char lbl[72], tb[16];
@@ -1417,9 +1469,11 @@ static void BuildChallengeMenu() {
     AddMenuItem(lbl, AC_COUNT_CYCLE, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %s",
               ModLocalize("Mod Guns"),
-              ModLocalize(g_guns ? "Yes" : "No"));
+              ModLocalize(guns ? "Yes" : "No"));
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
+    sprintf_s(lbl, "%s: %s", ModLocalize("Challenge Character", false), ferril ? "Ferril" : "Rayne");
+    AddMenuItem(lbl, AC_CHARACTER, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %s", ModLocalize("Challenge Bars"),
               ModLocalize(g_bars == BarsMaximum ? "Challenge Bars Maximum" : "Challenge Bars Base"));
     lbl[sizeof lbl - 1] = 0;
@@ -1427,8 +1481,8 @@ static void BuildChallengeMenu() {
     // Time first, then style. When they come from different runs, show the
     // paired result in parentheses next to each independent record.
     for (i = 0; i < (int)NUM_ARENAS; ++i) {
-        int ti = TrackIndexOf(ARENAS[i].lvls[g_guns][g_countSel]);
-        const auto records = ReadChallengeRecords(ti, g_diff, g_bars, g_combat, g_combatProfile);
+        int ti = TrackIndexOf(ARENAS[i].lvls[guns][g_countSel]);
+        const auto records = ReadChallengeRecords(ti, g_diff, g_bars, g_combat, g_combatProfile, ferril);
         const char* name = ModLocalize(ARENAS[i].name);
         FormatBest(records.bestTime, tb);
         if (g_combat != CombatEnhanced || !g_enhanced.styleEnabled) {
@@ -1519,9 +1573,18 @@ static int __cdecl DispatchOurs(int action) {
         return 0;
     }
     if (action == AC_GUNS_CYCLE) {
+        if (FerrilSelected()) return 0;
         g_guns ^= 1;
         InterlockedExchange(&g_chalDirty, 1);
         *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
+    if (action == AC_CHARACTER) {
+        if (g_ferrilAvailable && *(int*)G_MENU_STATE == MENU_CHALLENGE) {
+            InterlockedExchange(&g_character, FerrilSelected() ? ChallengeRayne : ChallengeFerril);
+            InterlockedExchange(&g_chalDirty, 1);
+            *(unsigned char*)G_MENU_REBUILD = 1;
+        }
         return 0;
     }
     if (action == AC_BARS_CYCLE) {
@@ -1533,13 +1596,20 @@ static int __cdecl DispatchOurs(int action) {
     const char* lvl = NULL;
     int i;
     i = action - AC_ARENA_BASE;
-    if (i >= 0 && i < (int)NUM_ARENAS)
-        lvl = ARENAS[i].lvls[g_guns][g_countSel];
+    if (i >= 0 && i < (int)NUM_ARENAS) {
+        const bool ferril = FerrilSelected();
+        lvl = ARENAS[i].lvls[ferril ? 0 : g_guns][g_countSel];
+        g_activeCharacter = ferril ? ChallengeFerril : ChallengeRayne;
+        g_characterTrack = ferril ? TrackIndexOf(lvl) : -1;
+    }
     i = action - AC_EXTRA_BASE;
     const Entry* e = NULL;
     if (!lvl && i >= 0 && i < (int)(sizeof(EXTRA)/sizeof(EXTRA[0])))
         e = &EXTRA[i];
-    if (!lvl && e) lvl = e->lvl;
+    if (!lvl && e) {
+        lvl = e->lvl;
+        g_characterTrack = -1;
+    }
     if (!lvl) return -1;
     g_challengeSession = IsStandaloneChallengeLevel(lvl);
     // 0x5EF4948 is the picked-level buffer: the state machine (0x569990)
@@ -2171,7 +2241,8 @@ static DamageFn_t g_origDamage = (DamageFn_t)0x00551160;
 static int __fastcall HookFerrilRender(void* self, void*) {
     void* actor = *(void**)G_PLAYER_OBJ;
     const ModOutfit* outfit = FindModOutfit(g_skinId);
-    if (self != actor || !g_ferrilTattoo || !outfit || outfit->id != 0x4252E023)
+    if (self != actor || (!FerrilChallengeActive() &&
+        (!g_ferrilTattoo || !outfit || outfit->id != 0x4252E023)))
         return g_origRender(self, 0);
     void* ctrl = (char*)actor + 0x158;
     if (!FerrilTattooResolve(ctrl)) return g_origRender(self, 0);
@@ -2382,6 +2453,12 @@ static void LoadConfig() {
     g_ferrilTattoo = GetPrivateProfileIntA("Appearance", "ferrilTattoo", 1,
                                            ".\\br2mod.ini");
     {   // remembered challenge options
+        g_ferrilAvailable = OutfitFileExists("models\\br2_ferril_player.bfm") &&
+                            OutfitFileExists("data\\br2_ferril_player.skb");
+        char character[16];
+        GetPrivateProfileStringA("Challenge", "character", "Rayne", character,
+                                 sizeof character, ".\\br2mod.ini");
+        g_character = _stricmp(character, "Ferril") == 0 ? ChallengeFerril : ChallengeRayne;
         int n = GetPrivateProfileIntA("Challenge", "count", 25,
                                       ".\\br2mod.ini");
         for (int i = 0; i < NUM_CNT; ++i)
@@ -2497,12 +2574,23 @@ static DWORD WINAPI Worker(LPVOID) {
         DWORD site = OUTFIT_INDEX_CALLS[i];
         char exp[5]; exp[0] = (char)0xE8;
         *(DWORD*)(exp + 1) = OUTFIT_INDEX_FN - (site + 5);
-        PatchCallChecked(site, exp, 5, ForceOutfitIndex);
+        PatchCallChecked(site, exp, 5, GetChallengeOutfitIndex);
     }
-    PatchCallChecked(0x549C3E,"\xE8\x6D\xCD\xFA\xFF",5,GetPlayerOutfitModel);
-    PatchCallChecked(0x54A25D,"\xE8\x4E\xC7\xFA\xFF",5,GetPlayerOutfitModel);
-    PatchCallChecked(0x54A3CA,"\xE8\xF1\xC5\xFA\xFF",5,GetPlayerOutfitPhysics);
+    PatchCallChecked(0x549C3E,"\xE8\x6D\xCD\xFA\xFF",5,GetChallengePlayerModel);
+    PatchCallChecked(0x54A25D,"\xE8\x4E\xC7\xFA\xFF",5,GetChallengePlayerModel);
+    PatchCallChecked(0x54A3CA,"\xE8\xF1\xC5\xFA\xFF",5,GetChallengePlayerPhysics);
     InstallFerrilTattoo();
+    PatchCallChecked(0x594EAE,"\xE8\x8D\xF6\xFF\xFF",5,HookRayneFeedWarning);
+    PatchVtableSlot(0x703508, 0x4032B0, (DWORD)HookChallengeVoice, "Challenge player voice");
+    PatchVtableSlot(0x703720, 0x551D30, (DWORD)HookRayneTaunt, "Rayne taunt");
+    if (g_ferrilAvailable) {
+        PatchCallChecked(0x5532C5,"\xE8\x66\xEC\x11\x00",5,HookFerrilMelee);
+        PatchCallChecked(0x673C75,"\xE8\xB6\xE2\xFF\xFF",5,HookFerrilMelee);
+        PatchCallChecked(0x6714AD,"\xE8\x5E\x6F\xF9\xFF",5,FerrilContactPosition);
+        PatchCallChecked(0x67178B,"\xE8\x90\x68\xF7\xFF",5,HookFerrilMeleeQuery);
+        PatchCallChecked(0x67718B,"\xE8\x00\xC5\xFE\xFF",5,HookFerrilFeedOrHarpoon);
+        PatchVtableSlot(0x6DD644, 0x407390, (DWORD)HookFerrilBladeRender, "Ferril blade visibility");
+    }
     // These were diagnostic workarounds for the wrong-this corruption now
     // fixed in HookA. VirtualQuery on every stricmp dominated character load.
     // Leave the native CRT/cache lookup and native chain path intact by default.
@@ -2558,6 +2646,8 @@ static DWORD WINAPI Worker(LPVOID) {
                                        g_guns ? "1" : "0", ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "maxBars",
                                        g_bars == BarsMaximum ? "1" : "0", ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "character",
+                                       g_character == ChallengeFerril ? "Ferril" : "Rayne", ".\\br2mod.ini");
         }
     }
 }

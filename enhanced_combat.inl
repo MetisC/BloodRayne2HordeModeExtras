@@ -405,6 +405,9 @@ void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
         !hit[0x68] || !(*(const float*)(hit + 0x6C) > 0.0f) ||
         !victim || victim == rayne || !CombatCharacter(victim)) return;
     const DWORD id = *(const DWORD*)(hit + 4);
+    const bool ferrilContact = rayne == g_ferrilContactActor && id == g_ferrilContactId;
+    // Claws use the native unarmed collision packet. Classify them as blade
+    // impacts for feedback without rewriting the packet seen by the enemy.
     const int type = *(const int*)hit;
     const int severity = *(const int*)(hit + 8);
     const bool melee = IsMeleeImpact(type);
@@ -412,7 +415,7 @@ void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
     const bool ranged = type == DamageBullet || type == DamageExplosion ||
                         (type == DamageFire && *(void* const*)(hit + 0x20));
     if (!id || (!melee && !ranged && type != DamageHarpoon)) return;
-    if (melee && id != *(DWORD*)(rayne + 0x82E4) && id != *(DWORD*)(rayne + 0x82E8) &&
+    if (melee && !ferrilContact && id != *(DWORD*)(rayne + 0x82E4) && id != *(DWORD*)(rayne + 0x82E8) &&
         id != *(DWORD*)(rayne + 0x82EC) && id != *(DWORD*)(rayne + 0x82F0)) return;
     DWORD attack = id;
     bool scatter = false;
