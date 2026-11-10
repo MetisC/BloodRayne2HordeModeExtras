@@ -186,7 +186,6 @@ static OutfitName_t GetDisplayNameN  = (OutfitName_t)0x4F6B10;
 typedef unsigned int (__cdecl *GetOutfitIndex_t)(void);
 #define OUTFIT_INDEX_FN 0x4F6930
 
-static int  g_skinOrder[16];                 // [0]=0(Default) then dress,rayne,rest
 static int  g_skinCount = 0;
 static int  g_skinIdx = 0;                   // selected index into g_skinOrder
 static int  g_skinId = 0;                    // resolved outfit id (0=default)
@@ -194,12 +193,88 @@ static int  g_nativeOutfit = -1;             // last game-written +0x3CC (-1=non
 static int  g_lastWrote = -1;                // our last +0x3CC write (-1=none)
 static char g_skinIni[40] = "default";
 static volatile LONG g_skinDirty = 0;
+struct ModOutfit {
+    int id;
+    const char* internal;
+    const char* label;
+    const char* model;
+    const char* physics;
+    const char* modelFile;
+    const char* skeletonFile;
+    const char* physicsFile;
+    const char* labelSuffix;
+};
+// Reserved outside both stock IDs and Gunsucked's custom outfit range.
+static constexpr ModOutfit ModOutfits[] = {
+    {0x4252E001, "br2_ephemera", "Ephemera", "br2_ephemera_hair.dfm", "ephemera.jug",
+     "models\\br2_ephemera_hair.bfm", "data\\br2_ephemera_hair.skb", nullptr},
+    {0x4252E002, "br2_kestral", "Kestral", "br2_kestral.dfm", "kestral.jug",
+     "models\\br2_kestral.bfm", "data\\br2_kestral.skb", nullptr},
+    {0x4252E003, "br2_dhampir_f", "Dhampir", "br2_dhampir_f.dfm", "br2_dhampir_f.jug",
+     "models\\br2_dhampir_f.bfm", "data\\br2_dhampir_f.skb", "models\\br2_dhampir_f.jug"},
+    {0x4252E004, "br2_ninjaf", "Ninja", "br2_ninjaf.dfm", "rayne_armor.jug",
+     "models\\br2_ninjaf.bfm", nullptr, nullptr},
+    {0x4252E005, "br2_fpunk_female", "Punk 1", "br2_fpunk_female.dfm", "br2_fpunk_female.jug",
+     "models\\br2_fpunk_female.bfm", nullptr, "models\\br2_fpunk_female.jug"},
+    {0x4252E006, "br2_fpunk_female_2", "Punk 2", "br2_fpunk_female_2.dfm", "br2_fpunk_female.jug",
+     "models\\br2_fpunk_female_2.bfm", nullptr, "models\\br2_fpunk_female.jug"},
+    {0x4252E007, "br2_fpunk_female_3", "Punk 3", "br2_fpunk_female_3.dfm", "br2_fpunk_female.jug",
+     "models\\br2_fpunk_female_3.bfm", nullptr, "models\\br2_fpunk_female.jug"},
+    {0x4252E008, "br2_fpunk_female_4", "Punk 4", "br2_fpunk_female_4.dfm", "br2_fpunk_female.jug",
+     "models\\br2_fpunk_female_4.bfm", nullptr, "models\\br2_fpunk_female.jug"},
+    {0x4252E009, "br2_fpunk_female_5", "Punk 5", "br2_fpunk_female_5.dfm", "br2_fpunk_female.jug",
+     "models\\br2_fpunk_female_5.bfm", nullptr, "models\\br2_fpunk_female.jug"},
+    {0x4252E00A, "br2_fpunk_female_6", "Punk 6", "br2_fpunk_female_6.dfm", "br2_fpunk_female.jug",
+     "models\\br2_fpunk_female_6.bfm", nullptr, "models\\br2_fpunk_female.jug"},
+    {0x4252E00B, "br2_zguest_f", "Ballroom Guest", "br2_zguest_f.dfm", "br2_zguest_f.jug",
+     "models\\br2_zguest_f.bfm", "data\\br2_zguest_f.skb", "models\\br2_zguest_f.jug", " 1"},
+    {0x4252E00C, "br2_zguest_f_2", "Ballroom Guest", "br2_zguest_f_2.dfm", "br2_zguest_f.jug",
+     "models\\br2_zguest_f_2.bfm", "data\\br2_zguest_f.skb", "models\\br2_zguest_f.jug", " 2"},
+    {0x4252E00D, "br2_zguest_f_3", "Ballroom Guest", "br2_zguest_f_3.dfm", "br2_zguest_f.jug",
+     "models\\br2_zguest_f_3.bfm", "data\\br2_zguest_f.skb", "models\\br2_zguest_f.jug", " 3"},
+    {0x4252E00E, "br2_zguest_f_4", "Ballroom Guest", "br2_zguest_f_4.dfm", "br2_zguest_f.jug",
+     "models\\br2_zguest_f_4.bfm", "data\\br2_zguest_f.skb", "models\\br2_zguest_f.jug", " 4"},
+    {0x4252E00F, "br2_zguest_f_5", "Ballroom Guest", "br2_zguest_f_5.dfm", "br2_zguest_f.jug",
+     "models\\br2_zguest_f_5.bfm", "data\\br2_zguest_f.skb", "models\\br2_zguest_f.jug", " 5"},
+    {0x4252E010, "br2_zguest_f_6", "Ballroom Guest", "br2_zguest_f_6.dfm", "br2_zguest_f.jug",
+     "models\\br2_zguest_f_6.bfm", "data\\br2_zguest_f.skb", "models\\br2_zguest_f.jug", " 6"},
+    {0x4252E011, "br2_zpunkf", "Zerenski Assassin", "br2_zpunkf.dfm", "zpunkf.jug",
+     "models\\br2_zpunkf.bfm", "data\\br2_zpunkf.skb", nullptr, " 1"},
+    {0x4252E012, "br2_zpunkf_2", "Zerenski Assassin", "br2_zpunkf_2.dfm", "zpunkf.jug",
+     "models\\br2_zpunkf_2.bfm", "data\\br2_zpunkf.skb", nullptr, " 2"},
+    {0x4252E013, "br2_zpunkf_3", "Zerenski Assassin", "br2_zpunkf_3.dfm", "zpunkf.jug",
+     "models\\br2_zpunkf_3.bfm", "data\\br2_zpunkf.skb", nullptr, " 3"},
+    {0x4252E014, "br2_zpunkf_4", "Zerenski Assassin", "br2_zpunkf_4.dfm", "zpunkf.jug",
+     "models\\br2_zpunkf_4.bfm", "data\\br2_zpunkf.skb", nullptr, " 4"},
+    {0x4252E015, "br2_zpunkf_5", "Zerenski Assassin", "br2_zpunkf_5.dfm", "zpunkf.jug",
+     "models\\br2_zpunkf_5.bfm", "data\\br2_zpunkf.skb", nullptr, " 5"},
+    {0x4252E016, "br2_zpunkf_6", "Zerenski Assassin", "br2_zpunkf_6.dfm", "zpunkf.jug",
+     "models\\br2_zpunkf_6.bfm", "data\\br2_zpunkf.skb", nullptr, " 6"},
+};
+static constexpr int MaxNativeOutfits = 10;
+static int g_skinOrder[1 + MaxNativeOutfits + sizeof(ModOutfits) / sizeof(ModOutfits[0])];
+
+static const ModOutfit* FindModOutfit(int id) {
+    for (const auto& outfit : ModOutfits)
+        if (outfit.id == id) return &outfit;
+    return nullptr;
+}
+
+static const char* SkinInternalName(int id) {
+    const auto* outfit = FindModOutfit(id);
+    return outfit ? outfit->internal : GetInternalNameN(id);
+}
+
+static bool OutfitFileExists(const char* path) {
+    const DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
 
 static void EnsureSkinOrder() {
     if (g_skinCount) return;
-    int ids[16], n = 0, dress = 0, rayne = 0, k = 0, i;
+    int ids[MaxNativeOutfits], n = 0, dress = 0, rayne = 0, k = 0, i;
     __try {
-        for (int id = 1; id <= 10; ++id) {
+        for (int id = 1; id <= MaxNativeOutfits; ++id) {
             const char* nm = GetInternalNameN(id);
             if (!nm || !nm[0]) continue;
             ids[n++] = id;
@@ -213,11 +288,17 @@ static void EnsureSkinOrder() {
     if (rayne) g_skinOrder[k++] = rayne;
     for (i = 0; i < n; ++i)
         if (ids[i] != dress && ids[i] != rayne) g_skinOrder[k++] = ids[i];
+    for (const auto& outfit : ModOutfits) {
+        if (OutfitFileExists(outfit.modelFile) &&
+            (!outfit.skeletonFile || OutfitFileExists(outfit.skeletonFile)) &&
+            (!outfit.physicsFile || OutfitFileExists(outfit.physicsFile)))
+            g_skinOrder[k++] = outfit.id;
+    }
     g_skinCount = k;
     if (_stricmp(g_skinIni, "default")) {
         __try {
             for (i = 1; i < k; ++i) {
-                const char* nm = GetInternalNameN(g_skinOrder[i]);
+                const char* nm = SkinInternalName(g_skinOrder[i]);
                 if (nm && !_stricmp(nm, g_skinIni)) { g_skinIdx = i; break; }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -248,7 +329,18 @@ static void ApplySkinForce() {
 // Call-site detour target: keep +0x3CC forced moments before the index read.
 static unsigned int __cdecl ForceOutfitIndex() {
     ApplySkinForce();
+    if (FindModOutfit(g_skinId)) return 0; // use Rayne's equipment and effects
     return ((GetOutfitIndex_t)OUTFIT_INDEX_FN)();
+}
+
+static const char* __cdecl GetPlayerOutfitModel() {
+    const auto* outfit = FindModOutfit(g_skinId);
+    return outfit ? outfit->model : ((const char* (__cdecl*)())0x4F69B0)();
+}
+
+static const char* __cdecl GetPlayerOutfitPhysics() {
+    const auto* outfit = FindModOutfit(g_skinId);
+    return outfit ? outfit->physics : ((const char* (__cdecl*)())0x4F69C0)();
 }
 // `call GetOutfitIndex` sites inside the path getters (Dfm/Gun/Jug/Blade/
 // Harpoon/InternalName/DisplayName-current variants).
@@ -468,6 +560,8 @@ static const ModLoc MODL[] = {
  {"Mod Horde", {"Horde Mode","Mode horde","Modalit\xE0 orda","Modo horda","Horden-Modus",0,"\xD0\xE5\xE6\xE8\xEC \xEE\xF0\xE4\xFB"}},
  {"Mansion Battle", {"Mansion Battle","Bataille du manoir","Battaglia nella villa","Batalla de la mansi\xF3n","Villen-Kampf",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5"}},
  {"Skin", {"Skin","Apparence","Aspetto","Apariencia","Aussehen",0,"\xCE\xE1\xEB\xE8\xEA"}},
+ {"Ballroom Guest", {"Ballroom Guest","Invit\xE9""e du bal","Invitata al ballo","Invitada del baile","Ballgast",0,"\xC3\xEE\xF1\xF2\xFC\xFF \xE1\xE0\xEB\xE0"}},
+ {"Zerenski Assassin", {"Zerenski Assassin","Tueuse de Zerenski","Sicaria di Zerenski","Sicaria de Zerenski","Zerenskis Attent\xE4terin",0,"\xD3\xE1\xE8\xE9\xF6\xE0 \xC7\xE5\xF0\xE5\xED\xF1\xEA\xE8"}},
  {"Default", {"Default","Par d\xE9""faut","Predefinito","Por defecto","Standard",0,"\xCF\xEE \xF3\xEC\xEE\xEB\xF7\xE0\xED\xE8\xFE"}},
 };
 // Language id of the loaded msglist (1=EN 2=FR 3=IT 4=ES 5=DE 6=JA 7=RU),
@@ -482,8 +576,8 @@ static int DetectLang(void) {
     if (!strcmp(e, "\xC2\xF0\xE0\xE3\xE8")) return 7;         // RU "Враги" cp1251
     return 1;                                                 // EN/JA/unknown
 }
-static const char* ModLocalize(const char* key) {
-    const char* r = Localize(key);
+static const char* ModLocalize(const char* key, bool useNativeTable = true) {
+    const char* r = useNativeTable ? Localize(key) : nullptr;
     if (r && strcmp(r, key)) return r;          // table resolved -> use it
     int i, lang = DetectLang();
     for (i = 0; i < (int)(sizeof MODL / sizeof MODL[0]); ++i)
@@ -1161,17 +1255,20 @@ static void __cdecl OnMenuBuilt() {
         EnsureSkinOrder();
         {
             static char sbuf[96];
-            // Native display names are English-only strings, but msglist
-            // carries translations keyed by them ("Cowgirl Rayne" -> ...).
             const char* sname;
-            if (g_skinId) {
+            const auto* outfit = FindModOutfit(g_skinId);
+            if (outfit) {
+                // Custom labels use only the mod's translations, away from native UI keys.
+                sname = ModLocalize(outfit->label, false);
+            } else if (g_skinId) {
                 const char* raw = GetDisplayNameN(g_skinId);
                 const char* loc = raw ? Localize(raw) : 0;
                 sname = loc ? loc : raw;
             } else {
                 sname = ModLocalize("Default");
             }
-            sprintf(sbuf, "%s: %s", ModLocalize("Skin"), sname ? sname : "?");
+            const char* suffix = outfit && outfit->labelSuffix ? outfit->labelSuffix : "";
+            sprintf(sbuf, "%s: %s%s", ModLocalize("Skin"), sname ? sname : "?", suffix);
             AddMenuItem(sbuf, AC_SKIN, 0);
         }
         break;
@@ -1304,7 +1401,7 @@ static int __cdecl DispatchOurs(int action) {
             const char* nm;
             g_skinIdx = (g_skinIdx + 1) % g_skinCount;
             g_skinId = g_skinOrder[g_skinIdx];
-            nm = g_skinId ? GetInternalNameN(g_skinId) : "default";
+            nm = g_skinId ? SkinInternalName(g_skinId) : "default";
             strncpy(g_skinIni, nm, sizeof g_skinIni - 1);
             g_skinIni[sizeof g_skinIni - 1] = 0;
             InterlockedExchange(&g_skinDirty, 1);
@@ -2050,6 +2147,9 @@ static DWORD WINAPI Worker(LPVOID) {
         *(DWORD*)(exp + 1) = OUTFIT_INDEX_FN - (site + 5);
         PatchCallChecked(site, exp, 5, ForceOutfitIndex);
     }
+    PatchCallChecked(0x549C3E,"\xE8\x6D\xCD\xFA\xFF",5,GetPlayerOutfitModel);
+    PatchCallChecked(0x54A25D,"\xE8\x4E\xC7\xFA\xFF",5,GetPlayerOutfitModel);
+    PatchCallChecked(0x54A3CA,"\xE8\xF1\xC5\xFA\xFF",5,GetPlayerOutfitPhysics);
     // These were diagnostic workarounds for the wrong-this corruption now
     // fixed in HookA. VirtualQuery on every stricmp dominated character load.
     // Leave the native CRT/cache lookup and native chain path intact by default.
