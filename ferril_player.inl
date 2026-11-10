@@ -162,8 +162,47 @@ static void __fastcall HookRayneFeedWarning(void* hud, void*, const char* messag
         ((void (__thiscall*)(void*, const char*, int))0x594540)(hud, message, line);
 }
 
+static char g_dhampirVoice[64];
+static unsigned g_dhampirVoiceSpin;
+
+// Map a rayne_vc_* sample to the matching dhampirf_* voice. Numbered Rayne
+// samples keep their index so variety is preserved; unnumbered ones rotate.
+static const char* DhampirVoiceFor(const char* sample) {
+    struct VoiceMap { const char* prefix; int prefixLen; const char* base; int variants; };
+    static const VoiceMap map[] = {
+        {"rayne_vc_hit_",  13, "hurt",   6},
+        {"rayne_vc_burn_", 14, "onfire", 4},
+    };
+    for (const auto& m : map) {
+        if (_strnicmp(sample, m.prefix, m.prefixLen)) continue;
+        const int n = atoi(sample + m.prefixLen);
+        const int v = n > 0 ? (n - 1) % m.variants + 1
+                            : (int)(++g_dhampirVoiceSpin % m.variants) + 1;
+        sprintf_s(g_dhampirVoice, "dhampirf_%s_a_%02d.wav", m.base, v);
+        return g_dhampirVoice;
+    }
+    const char* rotating = NULL;
+    int variants = 0;
+    if (!_strnicmp(sample, "rayne_vc_die_", 13))        { rotating = "die";   variants = 4; }
+    else if (!_strnicmp(sample, "rayne_vc_comlev", 15)) { rotating = "taunt"; variants = 4; }
+    else if (!_strnicmp(sample, "rayne_vc_groundstrike", 21)) { rotating = "kill"; variants = 3; }
+    if (rotating) {
+        sprintf_s(g_dhampirVoice, "dhampirf_%s_a_%02d.wav", rotating,
+                  (int)(g_dhampirVoiceSpin++ % variants) + 1);
+        return g_dhampirVoice;
+    }
+    return NULL;
+}
+
 static void __fastcall HookRayneTaunt(BYTE* actor, void*, int event) {
-    if (actor != *(BYTE**)RayneActor || ActiveChallengeCharacter() == ChallengeRayne)
+    const auto character = ActiveChallengeCharacter();
+    if (actor == *(BYTE**)RayneActor && character == ChallengeDhampir) {
+        char name[64];
+        sprintf_s(name, "dhampirf_taunt_a_%02d.wav", (int)(g_dhampirVoiceSpin++ % 4) + 1);
+        ((DWORD (__thiscall*)(BYTE*, const char*))0x4032B0)(actor, name);
+        return;
+    }
+    if (actor != *(BYTE**)RayneActor || character == ChallengeRayne)
         ((void (__thiscall*)(BYTE*, int))0x551D30)(actor, event);
 }
 
@@ -176,6 +215,13 @@ static DWORD __fastcall HookChallengeVoice(BYTE* actor, void*, const char* sampl
             sample = "ferril_hurt_3.wav";
         else if (character == ChallengeFerril && !_strnicmp(sample, "rayne_vc_die_", 13))
             sample = "ferril_hurt_5.wav";
+        else if (character == ChallengeDhampir) {
+            if (const char* dh = DhampirVoiceFor(sample))
+                sample = dh;
+            else if (!_strnicmp(sample, "rayne_", 6) || !_strnicmp(sample, "rayne-", 6) ||
+                     !_stricmp(sample, "hero_jump.wav"))
+                return 0;
+        }
         else if (!_strnicmp(sample, "rayne_", 6) || !_strnicmp(sample, "rayne-", 6) ||
                  !_stricmp(sample, "hero_jump.wav"))
             return 0;

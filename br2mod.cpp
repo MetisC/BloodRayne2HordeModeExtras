@@ -469,11 +469,12 @@ static int TrackIndexOf(const char* lvl) {
     return -1;
 }
 
-enum ChallengeCharacter { ChallengeRayne, ChallengeFerril };
+enum ChallengeCharacter { ChallengeRayne, ChallengeFerril, ChallengeDhampir };
 static volatile LONG g_character = ChallengeRayne;
 static ChallengeCharacter g_activeCharacter = ChallengeRayne;
 static int g_characterTrack = -1;
 static bool g_ferrilAvailable;
+static bool g_dhampirAvailable;
 static BYTE* g_ferrilContactActor;
 static DWORD g_ferrilContactId;
 static int g_ferrilContactBone = -1;
@@ -491,16 +492,67 @@ static bool FerrilChallengeActive() {
     return ActiveChallengeCharacter() == ChallengeFerril;
 }
 
+static const char* ChallengeCharacterName(ChallengeCharacter c) {
+    return c == ChallengeFerril ? "Ferril" : c == ChallengeDhampir ? "Dhampir" : "Rayne";
+}
+
+static bool ChallengeCharacterAvailable(ChallengeCharacter c) {
+    if (c == ChallengeFerril) return g_ferrilAvailable;
+    if (c == ChallengeDhampir) return g_dhampirAvailable;
+    return c == ChallengeRayne;
+}
+
+// Records for non-Rayne characters live in their own INI sections.
+static const char* ChallengeCharacterSuffix(ChallengeCharacter c) {
+    return c == ChallengeFerril ? "_Ferril_v2" : c == ChallengeDhampir ? "_Dhampir_v1" : "";
+}
+
+// The character picked in the challenge menu, or Rayne if it is unavailable.
+static ChallengeCharacter SelectedChallengeCharacter() {
+    const ChallengeCharacter c = (ChallengeCharacter)g_character;
+    return ChallengeCharacterAvailable(c) ? c : ChallengeRayne;
+}
+
+// Characters keep their own equipment: those without gun attachments force
+// the melee arena variant and lock the Guns option to No. Dhampir carries
+// gunL/gunR stock attachments (DHAMPIRFIGHT.LVL equips her with the rayne
+// gun); Ferril fights bare-handed.
+static bool ChallengeCharacterHasGuns(ChallengeCharacter c) {
+    return c != ChallengeFerril;
+}
+
 static unsigned int __cdecl GetChallengeOutfitIndex() {
-    return FerrilChallengeActive() ? 0 : ForceOutfitIndex();
+    return ActiveChallengeCharacter() != ChallengeRayne ? 0 : ForceOutfitIndex();
 }
 
 static const char* __cdecl GetChallengePlayerModel() {
-    return FerrilChallengeActive() ? "br2_ferril_player.dfm" : GetPlayerOutfitModel();
+    switch (ActiveChallengeCharacter()) {
+    case ChallengeFerril:  return "br2_ferril_player.dfm";
+    case ChallengeDhampir: return "br2_dhampir_player.dfm";
+    }
+    return GetPlayerOutfitModel();
 }
 
 static const char* __cdecl GetChallengePlayerPhysics() {
-    return FerrilChallengeActive() ? "ferril.jug" : GetPlayerOutfitPhysics();
+    switch (ActiveChallengeCharacter()) {
+    case ChallengeFerril:  return "ferril.jug";
+    case ChallengeDhampir: return "br2_dhampir_player.jug";
+    }
+    return GetPlayerOutfitPhysics();
+}
+
+// Outfit weapon-model accessors are each called from exactly one site:
+// +4 gun at 0x5845C9, +12 blade at 0x407149. Dhampir equips her own stock
+// models (WEAPON_DHAMPIR_GUNS.SMB / WEAPON_DHAMPIR_BLADES.SMB), keeping the
+// native rayne models for every other character.
+static const char* __cdecl GetChallengeGunModel() {
+    return ActiveChallengeCharacter() == ChallengeDhampir
+        ? "weapon_dhampir_guns.smf" : ((const char* (__cdecl*)())0x4F69D0)();
+}
+
+static const char* __cdecl GetChallengeBladeModel() {
+    return ActiveChallengeCharacter() == ChallengeDhampir
+        ? "br2_dhampir_blades.smf" : ((const char* (__cdecl*)())0x4F6A70)();
 }
 
 static const Entry EXTRA[] = {
@@ -856,9 +908,9 @@ static void TimeKey(const char* lvl, char* out) {
     out[n] = 0;
 }
 static void TimeSection(int difficulty, int bars, int combat, unsigned long long profile,
-                        char (&out)[96], bool ferril = false) {
+                        char (&out)[96], ChallengeCharacter who = ChallengeRayne) {
     const char* capacity = bars == BarsMaximum ? "Max" : "Base";
-    const char* character = ferril ? "_Ferril_v2" : "";
+    const char* character = ChallengeCharacterSuffix(who);
     if (combat == CombatEnhanced)
         sprintf_s(out, "Times_v4_%s_Bars%s_Enhanced_%016llX%s", PRESETS[difficulty].name, capacity, profile, character);
     else
@@ -884,12 +936,12 @@ struct ChallengeRecords {
 enum ChallengeRecordFlags { RecordTime = 1, RecordStyle = 2 };
 
 static ChallengeRecords ReadChallengeRecords(int idx, int difficulty, int bars, int combat,
-                                             unsigned long long profile, bool ferril) {
+                                             unsigned long long profile, ChallengeCharacter who) {
     if (idx < 0 || idx >= NUM_TRACKS) return {};
-    if (combat == CombatNormal && !ferril) return {g_bestTimes[idx][difficulty][bars]};
+    if (combat == CombatNormal && who == ChallengeRayne) return {g_bestTimes[idx][difficulty][bars]};
     char key[64], sec[96];
     TimeKey(TRACK_LVLS[idx], key);
-    TimeSection(difficulty, bars, combat, profile, sec, ferril);
+    TimeSection(difficulty, bars, combat, profile, sec, who);
     if (combat == CombatNormal) return {GetPrivateProfileIntA(sec, key, 0, TIMES_FILE)};
     char value[64];
     GetPrivateProfileStringA(sec, key, "", value, sizeof value, TIMES_FILE);
@@ -910,8 +962,8 @@ static int SaveChallengeRecords(int idx, DWORD ms, int style) {
     if (!ms) return 0;
     const bool enhanced = g_runCombat == CombatEnhanced;
     const int difficulty = enhanced ? g_runDifficulty : g_diff;
-    const bool ferril = FerrilChallengeActive();
-    auto records = ReadChallengeRecords(idx, difficulty, g_runBars, g_runCombat, g_runCombatProfile, ferril);
+    const ChallengeCharacter who = ActiveChallengeCharacter();
+    auto records = ReadChallengeRecords(idx, difficulty, g_runBars, g_runCombat, g_runCombatProfile, who);
     int flags = 0;
     if (!records.bestTime || ms < records.bestTime || (ms == records.bestTime && style > records.styleAtBestTime)) {
         records.bestTime = ms;
@@ -932,12 +984,12 @@ static int SaveChallengeRecords(int idx, DWORD ms, int style) {
                   records.bestStyle, records.timeAtBestStyle);
     else
         sprintf_s(val, "%lu", records.bestTime);
-    TimeSection(difficulty, g_runBars, g_runCombat, g_runCombatProfile, sec, ferril);
+    TimeSection(difficulty, g_runBars, g_runCombat, g_runCombatProfile, sec, who);
     if (!WritePrivateProfileStringA(sec, key, val, TIMES_FILE)) {
         LogParry("record-write-failed", ms, flags, 0, style);
         return 0;
     }
-    if (!enhanced && !ferril) g_bestTimes[idx][difficulty][g_runBars] = ms;
+    if (!enhanced && who == ChallengeRayne) g_bestTimes[idx][difficulty][g_runBars] = ms;
     LogParry("record-saved", ms, flags, 0, style, 0, 0, NULL, NULL, 0,
              (float)records.bestTime, (float)records.bestStyle, (float)records.timeAtBestStyle);
     return flags;
@@ -1162,7 +1214,7 @@ static void __cdecl HudTick() {
     if (g_runArmed && !g_runDone && !menuOpen && gso &&
         IsStandaloneChallengeLevel(lvl))
         g_runAccum += *(float*)(gso + 0x3D8);
-    if (!menuOpen && !FerrilChallengeActive()) ApplySkinForce();
+    if (!menuOpen && ActiveChallengeCharacter() == ChallengeRayne) ApplySkinForce();
     if (!IsStandaloneChallengeLevel(lvl)) return;
     if (menuOpen) return;
     if (!gso) return;
@@ -1446,10 +1498,6 @@ static int g_countSel = 1;      // COUNTS index shown on the cycler (25 default)
 static int g_guns = 0;          // 0 = blades only, 1 = bloodguns too
 static volatile LONG g_chalDirty = 0;  // [Challenge] options need flushing
 
-static bool FerrilSelected() {
-    return g_ferrilAvailable && g_character == ChallengeFerril;
-}
-
 static void FormatBest(DWORD best, char* tb) {
     if (best) sprintf(tb, "%u'%02u'%02u", best / 60000u,
                       (best / 1000u) % 60u, (best / 10u) % 100u);
@@ -1458,8 +1506,8 @@ static void FormatBest(DWORD best, char* tb) {
 
 static void BuildChallengeMenu() {
     int i;
-    const bool ferril = FerrilSelected();
-    const int guns = ferril ? 0 : g_guns;
+    const ChallengeCharacter who = SelectedChallengeCharacter();
+    const int guns = ChallengeCharacterHasGuns(who) ? g_guns : 0;
     *(int*)G_ITEM_COUNT = 0;
     // Label buffer inside a menu item is 72 bytes: keep texts under it.
     char lbl[72], tb[16];
@@ -1472,7 +1520,7 @@ static void BuildChallengeMenu() {
               ModLocalize(guns ? "Yes" : "No"));
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
-    sprintf_s(lbl, "%s: %s", ModLocalize("Challenge Character", false), ferril ? "Ferril" : "Rayne");
+    sprintf_s(lbl, "%s: %s", ModLocalize("Challenge Character", false), ChallengeCharacterName(who));
     AddMenuItem(lbl, AC_CHARACTER, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %s", ModLocalize("Challenge Bars"),
               ModLocalize(g_bars == BarsMaximum ? "Challenge Bars Maximum" : "Challenge Bars Base"));
@@ -1482,7 +1530,7 @@ static void BuildChallengeMenu() {
     // paired result in parentheses next to each independent record.
     for (i = 0; i < (int)NUM_ARENAS; ++i) {
         int ti = TrackIndexOf(ARENAS[i].lvls[guns][g_countSel]);
-        const auto records = ReadChallengeRecords(ti, g_diff, g_bars, g_combat, g_combatProfile, ferril);
+        const auto records = ReadChallengeRecords(ti, g_diff, g_bars, g_combat, g_combatProfile, who);
         const char* name = ModLocalize(ARENAS[i].name);
         FormatBest(records.bestTime, tb);
         if (g_combat != CombatEnhanced || !g_enhanced.styleEnabled) {
@@ -1573,15 +1621,18 @@ static int __cdecl DispatchOurs(int action) {
         return 0;
     }
     if (action == AC_GUNS_CYCLE) {
-        if (FerrilSelected()) return 0;
+        if (!ChallengeCharacterHasGuns(SelectedChallengeCharacter())) return 0;
         g_guns ^= 1;
         InterlockedExchange(&g_chalDirty, 1);
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
     if (action == AC_CHARACTER) {
-        if (g_ferrilAvailable && *(int*)G_MENU_STATE == MENU_CHALLENGE) {
-            InterlockedExchange(&g_character, FerrilSelected() ? ChallengeRayne : ChallengeFerril);
+        if (*(int*)G_MENU_STATE == MENU_CHALLENGE) {
+            LONG next = g_character;
+            do next = (next + 1) % 3;
+            while (!ChallengeCharacterAvailable((ChallengeCharacter)next));
+            InterlockedExchange(&g_character, next);
             InterlockedExchange(&g_chalDirty, 1);
             *(unsigned char*)G_MENU_REBUILD = 1;
         }
@@ -1597,10 +1648,10 @@ static int __cdecl DispatchOurs(int action) {
     int i;
     i = action - AC_ARENA_BASE;
     if (i >= 0 && i < (int)NUM_ARENAS) {
-        const bool ferril = FerrilSelected();
-        lvl = ARENAS[i].lvls[ferril ? 0 : g_guns][g_countSel];
-        g_activeCharacter = ferril ? ChallengeFerril : ChallengeRayne;
-        g_characterTrack = ferril ? TrackIndexOf(lvl) : -1;
+        const ChallengeCharacter who = SelectedChallengeCharacter();
+        lvl = ARENAS[i].lvls[ChallengeCharacterHasGuns(who) ? g_guns : 0][g_countSel];
+        g_activeCharacter = who;
+        g_characterTrack = who != ChallengeRayne ? TrackIndexOf(lvl) : -1;
     }
     i = action - AC_EXTRA_BASE;
     const Entry* e = NULL;
@@ -2455,10 +2506,17 @@ static void LoadConfig() {
     {   // remembered challenge options
         g_ferrilAvailable = OutfitFileExists("models\\br2_ferril_player.bfm") &&
                             OutfitFileExists("data\\br2_ferril_player.skb");
+        g_dhampirAvailable = OutfitFileExists("models\\br2_dhampir_player.bfm") &&
+                             OutfitFileExists("data\\br2_dhampir_player.skb") &&
+                             OutfitFileExists("models\\br2_dhampir_player.jug") &&
+                             OutfitFileExists("models\\br2_dhampir_blades.smb");
         char character[16];
         GetPrivateProfileStringA("Challenge", "character", "Rayne", character,
                                  sizeof character, ".\\br2mod.ini");
-        g_character = _stricmp(character, "Ferril") == 0 ? ChallengeFerril : ChallengeRayne;
+        g_character = !_stricmp(character, "Ferril") ? ChallengeFerril :
+                      !_stricmp(character, "Dhampir") ? ChallengeDhampir : ChallengeRayne;
+        if (!ChallengeCharacterAvailable((ChallengeCharacter)g_character))
+            g_character = ChallengeRayne;
         int n = GetPrivateProfileIntA("Challenge", "count", 25,
                                       ".\\br2mod.ini");
         for (int i = 0; i < NUM_CNT; ++i)
@@ -2579,6 +2637,8 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchCallChecked(0x549C3E,"\xE8\x6D\xCD\xFA\xFF",5,GetChallengePlayerModel);
     PatchCallChecked(0x54A25D,"\xE8\x4E\xC7\xFA\xFF",5,GetChallengePlayerModel);
     PatchCallChecked(0x54A3CA,"\xE8\xF1\xC5\xFA\xFF",5,GetChallengePlayerPhysics);
+    PatchCallChecked(0x5845C9,"\xE8\x02\x24\xF7\xFF",5,GetChallengeGunModel);
+    PatchCallChecked(0x407149,"\xE8\x22\xF9\x0E\x00",5,GetChallengeBladeModel);
     InstallFerrilTattoo();
     PatchCallChecked(0x594EAE,"\xE8\x8D\xF6\xFF\xFF",5,HookRayneFeedWarning);
     PatchVtableSlot(0x703508, 0x4032B0, (DWORD)HookChallengeVoice, "Challenge player voice");
@@ -2647,7 +2707,7 @@ static DWORD WINAPI Worker(LPVOID) {
             WritePrivateProfileStringA("Challenge", "maxBars",
                                        g_bars == BarsMaximum ? "1" : "0", ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "character",
-                                       g_character == ChallengeFerril ? "Ferril" : "Rayne", ".\\br2mod.ini");
+                                       ChallengeCharacterName((ChallengeCharacter)g_character), ".\\br2mod.ini");
         }
     }
 }
