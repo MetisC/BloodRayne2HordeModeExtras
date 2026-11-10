@@ -184,16 +184,21 @@ void StartFeedExecution(BYTE* rayne, const FeedExecutionCue& cue, float frame) {
 
 const CombatAnimationEvent* __fastcall HookCombatAnimationStep(BYTE* controller, void*, float* seconds) {
     const auto advance = (const CombatAnimationEvent* (__thiscall*)(BYTE*, float*))0x607C20;
-    if (!EnhancedCombatActive()) return advance(controller, seconds);
+    const auto step = [&] {
+        const auto* event = advance(controller, seconds);
+        if (event && event->type == 0 && event->value == KaganWaveCue) PlayKaganWave(controller);
+        return event;
+    };
+    if (!EnhancedCombatActive()) return step();
     BYTE* rayne = *(BYTE**)RayneActor;
-    if (!rayne) return advance(controller, seconds);
+    if (!rayne) return step();
     const auto* actor = (BYTE*)((DWORD)controller - 0x158);
     const bool isRayne = actor == rayne;
     const bool hitstopActor = !g_enhanced.hitstopGlobal &&
         (isRayne || actor == g_hitstop.target) && HitstopActive(GetTickCount());
     const bool feedActor = isRayne && g_enhanced.feedExecutionEnabled;
     const float escapeRate = isRayne ? FeedEscapeAnimationRate(rayne) : 1.0f;
-    if (!hitstopActor && !feedActor && escapeRate == 1.0f) return advance(controller, seconds);
+    if (!hitstopActor && !feedActor && escapeRate == 1.0f) return step();
 
     const int state = *(const int*)(rayne + 0x17C);
     const auto* cue = feedActor ? FeedCueForState(state) : NULL;
@@ -220,6 +225,7 @@ const CombatAnimationEvent* __fastcall HookCombatAnimationStep(BYTE* controller,
     const auto* event = advance(controller, seconds);
     // Keep the remainder in the caller's units when it loops over events.
     if (rate != 1.0f) *seconds /= rate;
+    if (event && event->type == 0 && event->value == KaganWaveCue) PlayKaganWave(controller);
 #ifdef BR2_COMBAT_TEST
     if (hitstopActor && !(g_hitstop.tracedPose & bit)) {
         g_hitstop.tracedPose |= bit;

@@ -41,10 +41,10 @@ def rec_at(skb, i, field):
     return skb, 8 + SKB_BONE * i + field
 
 
-def build_skeleton(dhampir, rayne):
+def build_skeleton(dhampir, rayne, skip=None):
     d_names = bone_names(dhampir)
     r_names = bone_names(rayne)
-    missing = [n for n in r_names if n not in d_names]
+    missing = [n for n in r_names if n not in d_names and not (skip and skip(n))]
     if not missing:
         raise ValueError("dhampir skeleton already complete")
     new_names = d_names + missing
@@ -73,7 +73,7 @@ def build_skeleton(dhampir, rayne):
     return bytes(result), new_names
 
 
-def build_model(dbfm, rbfm, new_names):
+def build_model(dbfm, rbfm, new_names, asset=ASSET):
     count = len(dbfm.bones)
     extra = len(new_names) - count
     if extra <= 0:
@@ -109,7 +109,7 @@ def build_model(dbfm, rbfm, new_names):
     # the offset of that field for each packet
     for offset, _, _ in dbfm.meshes:
         pack_into("<I", result, offset + RIG_ENTRY * extra, count + extra)
-    result[32:112] = fixed(ASSET + ".skl", 80)
+    result[32:112] = fixed(asset + ".skl", 80)
     return bytes(result)
 
 

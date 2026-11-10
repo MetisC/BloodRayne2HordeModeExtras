@@ -23,7 +23,8 @@ Gunsucked).
 - Global **Difficulty** under Options: `Minion | Dhampir | Overlord |
   Unraveller | Custom` — real gameplay scaling; `Custom` reads live
   multipliers from `br2mod.ini`
-- Global **Combat** under Options offers Normal and Enhanced. Enhanced adds
+- Global **Combat** under Options offers Normal and Enhanced. New installs
+  default to Enhanced with hitstop on. Enhanced adds
   parry on Lock-On, hitstop, recovery protection, a hit counter and a style
   grade. It also adds effects for combo endings and parry follow-ups, combo
   continuation after a directional evade, and a brief camera and time pulse

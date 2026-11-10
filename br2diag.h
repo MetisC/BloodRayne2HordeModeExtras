@@ -272,6 +272,44 @@ static void __declspec(naked) HookEffectRegisterTrace() {
     __asm { push 0x4A2B29 }
     __asm { ret }
 }
+// Dedicated sfx trace: own flag + own file, independent from LoaderTrace.
+static int g_sfxTrace = 0;
+static FILE* g_sfxLog;
+static void SfxTraceLine(const char* tag, const char* format, ...) {
+    if (!g_sfxTrace) return;
+    DWORD lastError = GetLastError();
+    if (!g_sfxLog) {
+        if (fopen_s(&g_sfxLog, "br2mod_sfx.log", "a") || !g_sfxLog) { SetLastError(lastError); return; }
+        fprintf(g_sfxLog, "--- build %s %s pid=%lu ---\n", __DATE__, __TIME__, GetCurrentProcessId());
+    }
+    fprintf(g_sfxLog, "%08lu %-5s ", GetTickCount(), tag);
+    va_list args; va_start(args, format);
+    vfprintf(g_sfxLog, format, args);
+    va_end(args);
+    fputc('\n', g_sfxLog);
+    fflush(g_sfxLog);
+    SetLastError(lastError);
+}
+// 0x621CC0 stolen: push ebp; mov ebp,esp; sub esp,100h (9B).
+// Engine sample-start chokepoint: every public startSfx*(name,...) wrapper
+// funnels here. [ebp+8] = sample name, [ebp+4] = wrapper return address.
+static void __cdecl TraceSfxStart(DWORD ret, const char* name) {
+    char text[160]; SafeText(name, text, sizeof text);
+    SfxTraceLine("sfx", "caller=%08lX name='%s'", ret, text);
+}
+static void __declspec(naked) HookSfxStartTrace() {
+    __asm { push ebp }
+    __asm { mov ebp,esp }
+    __asm { sub esp,0x100 }
+    BR2_SAVE_CPU
+    __asm { push dword ptr [ebp+8] }
+    __asm { push dword ptr [ebp+4] }
+    __asm { call TraceSfxStart }
+    __asm { add esp,8 }
+    BR2_RESTORE_CPU
+    __asm { push 0x621CC9 }
+    __asm { ret }
+}
 // 0x4A2953 stolen: mov eax,[ebp+8]; push eax; push ebx; mov ecx,esi (7B).
 static void __declspec(naked) HookEffectLoadTrace() {
     BR2_SAVE_CPU

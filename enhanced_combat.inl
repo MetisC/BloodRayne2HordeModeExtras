@@ -176,11 +176,22 @@ float LocalHitstopRate(void* channel, float delta) {
     return rate;
 }
 
+constexpr int ChallengeTriangleState = 46;
+
 void ScheduleHitstop(const BYTE* target, int duration, DWORD now, DWORD id, DWORD group,
                      HitstopKind kind = HitstopImpact) {
     if (!g_enhanced.hitstopEnabled || !duration) return;
     const BYTE* rayne = *(const BYTE**)RayneActor;
     if (!rayne || *(void* const*)(rayne + 0x83C0) || *(void* const*)(rayne + 0x8374)) return;
+    if (kind != HitstopReceived && ActiveChallengeCharacter() == ChallengeEphemera) {
+        // Slot 46's last blade damage window starts on frame 46 of flurry.ani.
+        // Gate the shared scheduler so early cuts cannot pause via a riposte either.
+        constexpr float lastCutFrame = 46.0f;
+        if (*(const int*)(rayne + 0x17C) == ChallengeTriangleState &&
+            *(const float*)(rayne + 0x180) < lastCutFrame) return;
+        duration = (int)(duration * g_enhanced.ephemeraHitstopScale + 0.5f);
+        if (!duration) return;
+    }
     const bool upgrade = kind == HitstopSpecial && g_hitstop.kind == HitstopImpact &&
         g_hitstop.group == group && HitstopActive(now);
     const bool replacesReceived = kind != HitstopReceived && g_hitstop.kind == HitstopReceived;
@@ -400,9 +411,10 @@ void DamageShowcase() {
     g_riposteTarget = NULL;
 }
 
-void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
+static void RecordOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit,
+                              float damage, bool confirmedMeleeContact) {
     if (!EnhancedCombatActive() || rayne != *(BYTE**)RayneActor ||
-        !hit[0x68] || !(*(const float*)(hit + 0x6C) > 0.0f) ||
+        !(damage > 0.0f) ||
         !victim || victim == rayne || !CombatCharacter(victim)) return;
     const DWORD id = *(const DWORD*)(hit + 4);
     const bool ferrilContact = rayne == g_ferrilContactActor && id == g_ferrilContactId;
@@ -415,7 +427,8 @@ void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
     const bool ranged = type == DamageBullet || type == DamageExplosion ||
                         (type == DamageFire && *(void* const*)(hit + 0x20));
     if (!id || (!melee && !ranged && type != DamageHarpoon)) return;
-    if (melee && !ferrilContact && id != *(DWORD*)(rayne + 0x82E4) && id != *(DWORD*)(rayne + 0x82E8) &&
+    if (melee && !ferrilContact && !confirmedMeleeContact &&
+        id != *(DWORD*)(rayne + 0x82E4) && id != *(DWORD*)(rayne + 0x82E8) &&
         id != *(DWORD*)(rayne + 0x82EC) && id != *(DWORD*)(rayne + 0x82F0)) return;
     DWORD attack = id;
     bool scatter = false;
@@ -441,7 +454,7 @@ void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
     auto& impact = g_recentImpacts[g_impactCursor++ % _countof(g_recentImpacts)];
     impact = {attack, victim, special};
     LogParry("outgoing-hit", 0, type, severity, *(int*)(rayne + 0x17C), 0,
-             id, victim, rayne, attack, *(const float*)(hit + 0x6C), *(float*)(victim + 0x39C8));
+             id, victim, rayne, attack, damage, *(float*)(victim + 0x39C8));
     const DWORD now = GetTickCount();
     if (g_enhanced.comboEnabled && (melee || (ranged && g_enhanced.comboRanged) ||
         (type == DamageHarpoon && g_enhanced.comboHarpoonDamage))) {
@@ -468,6 +481,10 @@ void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
         else
             LogParry("feedback-queue-full", 0, type, severity, 0, 0, id, victim, rayne, attack);
     }
+}
+
+void __cdecl ConfirmOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit) {
+    if (hit[0x68]) RecordOutgoingHit(rayne, victim, hit, *(const float*)(hit + 0x6C), false);
 }
 
 void FlushCombatImpacts() {

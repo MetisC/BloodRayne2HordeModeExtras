@@ -2,6 +2,7 @@
 #define ENHANCED_SETTINGS(X) \
     X(int, parryEnabled, 1, 0, 1) \
     X(int, parryWindowMs, 200, 0, 1500) \
+    X(int, parryGuardMs, 250, 0, 2000) \
     X(int, feedEscapeWindowMs, 300, 0, 1000) \
     X(float, feedEscapeRollRate, 1.0f, 1.0f, 3.0f) \
     X(int, feedEscapeKeepFacing, 1, 0, 1) \
@@ -30,6 +31,7 @@
     X(int, bladeHitstopMs, 115, 0, 400) \
     X(int, kickHitstopMs, 145, 0, 400) \
     X(int, heavyHitstopMs, 175, 0, 400) \
+    X(float, ephemeraHitstopScale, 0.50f, 0.0f, 1.0f) \
     X(int, heavyMinSeverity, 4, 1, 5) \
     X(int, hitstopGapMs, 105, 0, 1000) \
     X(float, hitstopRayneRate, 0.015f, 0.01f, 1.0f) \
@@ -178,6 +180,7 @@ unsigned long long CombatProfile(const EnhancedSettings& settings) {
 #define MIX(type, key, value, low, high) \
     if (strcmp(#key, "trace") != 0 && strcmp(#key, "styleRankSS") != 0 && \
         strcmp(#key, "styleRankSSS") != 0 && strcmp(#key, "styleRankV") != 0 && \
+        strcmp(#key, "ephemeraHitstopScale") != 0 && strcmp(#key, "parryGuardMs") != 0 && \
         strncmp(#key, "feedEscape", 10) != 0) { \
         const type field = rules.key == 0 ? type(0) : rules.key; \
         DWORD bits; \

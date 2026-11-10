@@ -18,6 +18,7 @@ float FeedExecutionWorldRate(DWORD now);
 void FlushCombatImpacts();
 void MarkShowcaseParry(BYTE* rayne, const BYTE* attacker, DWORD now);
 void CombatSound(BYTE* actor, const char* sample);
+BYTE* CombatCharacter(BYTE* actor);
 
 struct DeflectedHit {
     BYTE* attacker;
@@ -71,6 +72,11 @@ bool g_parryHeld = true;
 bool g_parryArmed;
 bool g_parryCooling;
 DWORD g_parryCooldownAt;
+struct ParryGuard {
+    const BYTE* player;
+    float remainingMs;
+};
+ParryGuard g_parryGuard;
 
 #ifdef BR2_COMBAT_TEST
 struct CombatTraceContext {
@@ -194,6 +200,7 @@ void ResetParry() {
         g_parryCooldownAt = GetTickCount();
     }
     g_deflectedHit = {};
+    g_parryGuard = {};
     g_parryAgeSeconds = 0.0f;
     g_parryPulseActive = false;
     g_parryPulseLogged = false;
@@ -313,6 +320,10 @@ void __fastcall HookParryInput(BYTE* game, void*) {
     TraceCombatFrame();
     // The native world delta already includes time powers and global hitstop.
     const float gameDeltaMs = max(0.0f, *(const float*)(game + 0x3D8) * 1000.0f);
+    if (g_parryGuard.player != rayne || !g_enhanced.parryEnabled || !g_enhanced.parryGuardMs)
+        g_parryGuard = {};
+    else
+        g_parryGuard.remainingMs = max(0.0f, g_parryGuard.remainingMs - gameDeltaMs);
     TickCombat(rayne, now, gameDeltaMs);
     // Native state 1 is held. Ignored presses never re-arm on their own.
     const bool held = *(int*)(rayne + 0x3A70) == 1;
@@ -444,6 +455,15 @@ int __cdecl TryParry(BYTE* rayne, BYTE* hit) {
     const int severity = *(const int*)(hit + 8);
     const int state = *(int*)(rayne + 0x17C);
     BYTE* attacker = *(BYTE* const*)(hit + 0x24);
+    // Use the same early exit as a deflection, before native guard/recoil.
+    // A protected contact never awards a parry or renews the window.
+    if (g_enhanced.parryGuardMs && g_parryGuard.player == rayne && g_parryGuard.remainingMs > 0.0f &&
+        kind != 0x87 && *(const float*)(hit + 0xC) > 0.0f &&
+        attacker && attacker != rayne && CombatCharacter(attacker)) {
+        LogParry("parry-guard-blocked", age, kind, severity, state, 0, hitId, attacker, rayne,
+                 0, g_parryGuard.remainingMs);
+        return 1;
+    }
     const bool melee = kind == 0x67 || kind == 0x84;
     const IncomingHit* previous = FindIncoming(attacker, hitId);
     if (previous || (hitId && hitId == *(DWORD*)(rayne + 0xF4))) {
@@ -478,6 +498,7 @@ int __cdecl TryParry(BYTE* rayne, BYTE* hit) {
     TRACE_COMBAT_SCOPE(hitId, attacker, rayne, hitId);
     RememberIncoming(attacker, hitId, now, true);
     g_deflectedHit = {attacker, hitId, now};
+    g_parryGuard = {rayne, (float)g_enhanced.parryGuardMs};
     g_parryTargetLogged = false;
     g_parryCooldownAt = g_deflectedHit.tick;
     g_parryCooling = true;

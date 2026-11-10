@@ -33,6 +33,7 @@
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
 #include <xinput.h>
+#include <intrin.h>
 #pragma comment(lib, "user32.lib")
 
 // ----------------------------- addresses ----------------------------------
@@ -119,7 +120,7 @@ static int g_diff = 1;
 static volatile LONG g_presetDirty = 0;
 enum CombatMode { CombatNormal, CombatEnhanced, CombatCount };
 static const char* const COMBAT_NAMES[] = { "Normal", "Enhanced" };
-static int g_combat = CombatNormal;
+static int g_combat = CombatEnhanced;
 static volatile LONG g_combatDirty = 0;
 enum CombatEffect { EffectCinematics, EffectHitstop, EffectParry, EffectDodge, EffectStyleHud, EffectCount };
 static const struct { const char* key; const char* label; } COMBAT_EFFECTS[] = {
@@ -342,7 +343,10 @@ static void EnsureSkinOrder() {
 // so a preset must be WRITTEN there to apply. We track what the game itself
 // last put there (anything but our own writes) so "Default" can restore the
 // real native pick once and then stay a pure no-op.
+static bool AlternateChallengeActive();
+
 static void ApplySkinForce() {
+    if (AlternateChallengeActive()) return;
     DWORD gs;
     EnsureSkinOrder();
     gs = *(DWORD*)G_GAME_STATE;
@@ -469,12 +473,23 @@ static int TrackIndexOf(const char* lvl) {
     return -1;
 }
 
-enum ChallengeCharacter { ChallengeRayne, ChallengeFerril, ChallengeDhampir };
+enum ChallengeCharacter {
+    ChallengeRayne, ChallengeFerril, ChallengeDhampir, ChallengeDhampirM,
+    ChallengeEphemera, ChallengeKestral, ChallengeKagan,
+    ChallengeNinjaF, ChallengeNinjaM
+};
+// Rayne first, then shared characters in ModOutfits order, then Challenge exclusives.
+static constexpr ChallengeCharacter ChallengeCharacterOrder[] = {
+    ChallengeRayne, ChallengeEphemera, ChallengeKestral, ChallengeDhampir,
+    ChallengeNinjaF, ChallengeFerril, ChallengeDhampirM, ChallengeKagan, ChallengeNinjaM
+};
 static volatile LONG g_character = ChallengeRayne;
 static ChallengeCharacter g_activeCharacter = ChallengeRayne;
 static int g_characterTrack = -1;
 static bool g_ferrilAvailable;
-static bool g_dhampirAvailable;
+static bool g_dhampirAvailable, g_dhampirMAvailable;
+static bool g_ephemeraAvailable, g_kestralAvailable;
+static bool g_kaganAvailable, g_ninjaFAvailable, g_ninjaMAvailable;
 static BYTE* g_ferrilContactActor;
 static DWORD g_ferrilContactId;
 static int g_ferrilContactBone = -1;
@@ -483,28 +498,101 @@ static void TickFerrilInput(BYTE* actor, const BYTE* game);
 
 static ChallengeCharacter ActiveChallengeCharacter() {
     if (g_characterTrack >= 0 &&
-        !_stricmp(LevelBasename((const char*)G_CURRENT_LEVEL), TRACK_LVLS[g_characterTrack]))
+        !_stricmp(LevelBasename((const char*)G_CURRENT_LEVEL),
+                  LevelBasename(TRACK_LVLS[g_characterTrack])))
         return g_activeCharacter;
     return ChallengeRayne;
+}
+
+struct ChallengeDamageScale {
+    float dealt;
+    float received;
+};
+
+// Indexed by ChallengeCharacter. The identity entries also cover Story Mode.
+static constexpr ChallengeDamageScale ChallengeDamage[] = {
+    {1.00f, 1.00f}, // Rayne
+    {1.00f, 0.95f}, // Ferril
+    {1.00f, 1.00f}, // Dhampir Woman
+    {1.00f, 0.95f}, // Dhampir Man
+    {0.90f, 1.10f}, // Ephemera, after her existing move multiplier
+    {1.10f, 1.00f}, // Kestral
+    {0.95f, 0.85f}, // Kagan
+    {1.10f, 1.05f}, // Ninja Woman
+    {1.10f, 1.05f}, // Ninja Man
+};
+static_assert(_countof(ChallengeDamage) == ChallengeNinjaM + 1, "Challenge damage profiles");
+
+static float __fastcall HookChallengeIncomingScale(void* game, void*) {
+    // The native player damage handler applies this before allocating damage
+    // between health and the fury shield, and before the mod difficulty hooks.
+    const float native = ((float (__thiscall*)(void*))0x4F6500)(game);
+    return ChallengeDamage[ActiveChallengeCharacter()].received * native;
 }
 
 static bool FerrilChallengeActive() {
     return ActiveChallengeCharacter() == ChallengeFerril;
 }
 
+static bool AlternateChallengeActive() {
+    return ActiveChallengeCharacter() != ChallengeRayne;
+}
+
+// Ferril, the male dhampir and the bosses cannot feed: their Triangle goes to
+// the shared special input path (dispatch 62 -> slot 46).
+static bool ChallengeUsesSpecialInput() {
+    const auto c = ActiveChallengeCharacter();
+    return c == ChallengeFerril || c == ChallengeDhampirM ||
+           c == ChallengeEphemera || c == ChallengeKestral ||
+           c == ChallengeKagan || c == ChallengeNinjaF || c == ChallengeNinjaM;
+}
+
 static const char* ChallengeCharacterName(ChallengeCharacter c) {
-    return c == ChallengeFerril ? "Ferril" : c == ChallengeDhampir ? "Dhampir" : "Rayne";
+    return c == ChallengeFerril ? "Ferril" : c == ChallengeDhampir ? "Dhampir" :
+           c == ChallengeDhampirM ? "DhampirM" :
+           c == ChallengeEphemera ? "Ephemera" :
+           c == ChallengeKestral ? "Kestral" :
+           c == ChallengeKagan ? "Kagan" :
+           c == ChallengeNinjaF ? "NinjaF" :
+           c == ChallengeNinjaM ? "NinjaM" : "Rayne";
+}
+
+// Localized display label for the challenge menu (INI keeps the ASCII name).
+static const char* ChallengeCharacterLabel(ChallengeCharacter c) {
+    switch (c) {
+    case ChallengeFerril:   return "Ferril";
+    case ChallengeDhampir:  return ModLocalize("Dhampir (Female)");
+    case ChallengeDhampirM: return ModLocalize("Dhampir (Male)");
+    case ChallengeEphemera: return ModLocalize("Ephemera");
+    case ChallengeKestral:  return ModLocalize("Kestral");
+    case ChallengeKagan:    return ModLocalize("Kagan");
+    case ChallengeNinjaF:   return ModLocalize("Ninja (Female)");
+    case ChallengeNinjaM:   return ModLocalize("Ninja (Male)");
+    }
+    return "Rayne";
 }
 
 static bool ChallengeCharacterAvailable(ChallengeCharacter c) {
     if (c == ChallengeFerril) return g_ferrilAvailable;
     if (c == ChallengeDhampir) return g_dhampirAvailable;
+    if (c == ChallengeDhampirM) return g_dhampirMAvailable;
+    if (c == ChallengeEphemera) return g_ephemeraAvailable;
+    if (c == ChallengeKestral) return g_kestralAvailable;
+    if (c == ChallengeKagan) return g_kaganAvailable;
+    if (c == ChallengeNinjaF) return g_ninjaFAvailable;
+    if (c == ChallengeNinjaM) return g_ninjaMAvailable;
     return c == ChallengeRayne;
 }
 
 // Records for non-Rayne characters live in their own INI sections.
 static const char* ChallengeCharacterSuffix(ChallengeCharacter c) {
-    return c == ChallengeFerril ? "_Ferril_v2" : c == ChallengeDhampir ? "_Dhampir_v1" : "";
+    return c == ChallengeFerril ? "_Ferril_v3" : c == ChallengeDhampir ? "_Dhampir_v1" :
+           c == ChallengeDhampirM ? "_DhampirM_v2" :
+           c == ChallengeEphemera ? "_Ephemera_v2" :
+           c == ChallengeKestral ? "_Kestral_v2" :
+           c == ChallengeKagan ? "_Kagan_v2" :
+           c == ChallengeNinjaF ? "_NinjaF_v2" :
+           c == ChallengeNinjaM ? "_NinjaM_v2" : "";
 }
 
 // The character picked in the challenge menu, or Rayne if it is unavailable.
@@ -518,7 +606,7 @@ static ChallengeCharacter SelectedChallengeCharacter() {
 // gunL/gunR stock attachments (DHAMPIRFIGHT.LVL equips her with the rayne
 // gun); Ferril fights bare-handed.
 static bool ChallengeCharacterHasGuns(ChallengeCharacter c) {
-    return c != ChallengeFerril;
+    return c == ChallengeRayne || c == ChallengeDhampir;
 }
 
 static unsigned int __cdecl GetChallengeOutfitIndex() {
@@ -529,6 +617,12 @@ static const char* __cdecl GetChallengePlayerModel() {
     switch (ActiveChallengeCharacter()) {
     case ChallengeFerril:  return "br2_ferril_player.dfm";
     case ChallengeDhampir: return "br2_dhampir_player.dfm";
+    case ChallengeDhampirM: return "br2_dhampir_m_player.dfm";
+    case ChallengeEphemera: return "br2_ephemera_player.dfm";
+    case ChallengeKestral:  return "br2_kestral_player.dfm";
+    case ChallengeKagan:    return "br2_kagan_player.dfm";
+    case ChallengeNinjaF:   return "br2_ninjaf_player.dfm";
+    case ChallengeNinjaM:   return "br2_ninjam_player.dfm";
     }
     return GetPlayerOutfitModel();
 }
@@ -537,6 +631,12 @@ static const char* __cdecl GetChallengePlayerPhysics() {
     switch (ActiveChallengeCharacter()) {
     case ChallengeFerril:  return "ferril.jug";
     case ChallengeDhampir: return "br2_dhampir_player.jug";
+    case ChallengeDhampirM: return "br2_dhampir_m_player.jug";
+    case ChallengeEphemera: return "br2_ephemera_player.jug";
+    case ChallengeKestral:  return "br2_kestral_player.jug";
+    case ChallengeKagan:    return "br2_kagan_player.jug";
+    case ChallengeNinjaF:   return "br2_ninjaf_player.jug";
+    case ChallengeNinjaM:   return "br2_ninjam_player.jug";
     }
     return GetPlayerOutfitPhysics();
 }
@@ -551,7 +651,12 @@ static const char* __cdecl GetChallengeGunModel() {
 }
 
 static const char* __cdecl GetChallengeBladeModel() {
-    return ActiveChallengeCharacter() == ChallengeDhampir
+    const auto c = ActiveChallengeCharacter();
+    // Enemy weapons need the player-convention collision part names.
+    if (c == ChallengeDhampirM) return "br2_dhampir_scimitar.smf";
+    if (c == ChallengeKagan) return "br2_kagan_sword.smf";
+    if (c == ChallengeNinjaF || c == ChallengeNinjaM) return "br2_ninja_blade.smf";
+    return c == ChallengeDhampir || c == ChallengeEphemera || c == ChallengeKestral
         ? "br2_dhampir_blades.smf" : ((const char* (__cdecl*)())0x4F6A70)();
 }
 
@@ -739,6 +844,13 @@ static const ModLoc MODL[] = {
  {"Ballroom Guest", {"Ballroom Guest","Invit\xE9""e du bal","Invitata al ballo","Invitada del baile","Ballgast",0,"\xC3\xEE\xF1\xF2\xFC\xFF \xE1\xE0\xEB\xE0"}},
  {"Zerenski Assassin", {"Zerenski Assassin","Tueuse de Zerenski","Sicaria di Zerenski","Sicaria de Zerenski","Zerenskis Attent\xE4terin",0,"\xD3\xE1\xE8\xE9\xF6\xE0 \xC7\xE5\xF0\xE5\xED\xF1\xEA\xE8"}},
  {"Default", {"Default","Par d\xE9""faut","Predefinito","Por defecto","Standard",0,"\xCF\xEE \xF3\xEC\xEE\xEB\xF7\xE0\xED\xE8\xFE"}},
+ {"Dhampir (Female)", {"Dhampir (Female)","Dhampir (Femelle)","Dhampir (Femmina)","Dhampir (Mujer)","Dhampir (Weiblich)",0,"\xC4\xE0\xEC\xEF\xE8\xF0 (\xE6\xE5\xED\xF1\xEA\xE8\xE9)"}},
+ {"Dhampir (Male)", {"Dhampir (Male)","Dhampir (M\xE2le)","Dhampir (Maschio)","Dhampir (Hombre)","Dhampir (M\xE4nnlich)",0,"\xC4\xE0\xEC\xEF\xE8\xF0 (\xEC\xF3\xE6\xF1\xEA\xEE\xE9)"}},
+ {"Ephemera", {"Ephemera","Ephemera","Ephemera","Ephemera","Ephemera",0,"\xDD\xF4\xE5\xEC\xE5\xF0\xE0"}},
+ {"Kestral", {"Kestral","Kestral","Kestral","Kestral","Kestral",0,"\xCA\xE5\xF1\xF2\xF0\xE0\xEB\xFC"}},
+ {"Kagan", {"Kagan","Kagan","Kagan","Kagan","Kagan",0,"\xCA\xE0\xE3\xE0\xED"}},
+ {"Ninja (Female)", {"Ninja (Female)","Ninja (Femelle)","Ninja (Femmina)","Ninja (Mujer)","Ninja (Weiblich)",0,"\xCD\xE8\xED\xE4\xE7\xFF (\xE6\xE5\xED\xF1\xEA\xE0\xFF)"}},
+ {"Ninja (Male)", {"Ninja (Male)","Ninja (M\xE2le)","Ninja (Maschio)","Ninja (Hombre)","Ninja (M\xE4nnlich)",0,"\xCD\xE8\xED\xE4\xE7\xFF (\xEC\xF3\xE6\xF1\xEA\xEE\xE9)"}},
 };
 // Language id of the loaded msglist (1=EN 2=FR 3=IT 4=ES 5=DE 6=JA 7=RU),
 // deduced from the stock key "Enemies" so it always matches the real table.
@@ -832,8 +944,12 @@ static void __declspec(naked) HookChallengePause() {
     }
 }
 
+constexpr int KaganWaveCue = 0x7F00;
+static void PlayKaganWave(BYTE* controller);
+
 #include "parry.inl"
 #include "enhanced_combat.inl"
+#include "challenge_specials.inl"
 #include "ferril_player.inl"
 
 static int ChallengeBarsRank(int bars) {
@@ -842,6 +958,7 @@ static int ChallengeBarsRank(int bars) {
 
 static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
     g_ferrilAttack = {};
+    g_ninjaShoulder = {};
     g_ferrilSpecialHeld = false;
     g_ferrilSpecialCooldown = 0.0f;
     ((void (__thiscall*)(void*, int))0x4F5640)(game, flag);
@@ -1099,7 +1216,22 @@ static int FeedExpectedVictimAnim(DWORD ranim) {
 // While the victim holds 0x73 during the F3 wind-up, drop ANY request that is
 // not a grabbed-family anim (locomotion AND combat anims alike: 0x08/0x16/
 // 0x5A/0x5B/0x41 and 0x11/0x19/0x6A/0x68/0x69/0x6C/0x6E seen in live logs).
-static int __cdecl KeepNativeRearFeedPose(DWORD controller,int requested) {
+static int __cdecl AdjustMotionRequest(DWORD controller, int requested, float* timing) {
+    constexpr int die1 = 212;
+    constexpr int dead1 = 213;
+    if (requested == dead1 && *(const int*)(controller + 0x24) == die1) {
+        BYTE* player = *(BYTE**)RayneActor;
+        if (player && controller == (DWORD)(player + 0x158)) {
+            const auto character = ActiveChallengeCharacter();
+            if (character == ChallengeKestral) {
+                // Both states share one clip. Hold the last pose in dead1
+                // without blending through the standing start of the clip.
+                const auto motion = (const BYTE* (__thiscall*)(DWORD, int))0x606020;
+                timing[0] = *(const float*)(motion(controller, requested) + 0x78);
+                timing[1] = 0.0f;
+            }
+        }
+    }
     if ((requested >= 0x70 && requested <= 0x85) || requested == 0x42)
         return 0;                       // grabbed family -> always allow
     __try {
@@ -1116,10 +1248,12 @@ static void __declspec(naked) HookFeedMotionRequest() {
     __asm { push ebp }
     __asm { mov ebp,esp }
     BR2_SAVE_CPU
+    __asm { lea edx,[ebp+0xC] }
+    __asm { push edx }
     __asm { push dword ptr [ebp+8] }
     __asm { push ecx }
-    __asm { call KeepNativeRearFeedPose }
-    __asm { add esp,8 }
+    __asm { call AdjustMotionRequest }
+    __asm { add esp,12 }
     __asm { mov [esp+556],eax }
     BR2_RESTORE_CPU
     __asm {
@@ -1520,7 +1654,7 @@ static void BuildChallengeMenu() {
               ModLocalize(guns ? "Yes" : "No"));
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
-    sprintf_s(lbl, "%s: %s", ModLocalize("Challenge Character", false), ChallengeCharacterName(who));
+    sprintf_s(lbl, "%s: %s", ModLocalize("Challenge Character", false), ChallengeCharacterLabel(who));
     AddMenuItem(lbl, AC_CHARACTER, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %s", ModLocalize("Challenge Bars"),
               ModLocalize(g_bars == BarsMaximum ? "Challenge Bars Maximum" : "Challenge Bars Base"));
@@ -1629,10 +1763,14 @@ static int __cdecl DispatchOurs(int action) {
     }
     if (action == AC_CHARACTER) {
         if (*(int*)G_MENU_STATE == MENU_CHALLENGE) {
-            LONG next = g_character;
-            do next = (next + 1) % 3;
-            while (!ChallengeCharacterAvailable((ChallengeCharacter)next));
-            InterlockedExchange(&g_character, next);
+            const LONG current = g_character;
+            const unsigned count = _countof(ChallengeCharacterOrder);
+            unsigned index = 0;
+            while (index + 1 < count && ChallengeCharacterOrder[index] != current)
+                ++index;
+            do index = (index + 1) % count;
+            while (!ChallengeCharacterAvailable(ChallengeCharacterOrder[index]));
+            InterlockedExchange(&g_character, ChallengeCharacterOrder[index]);
             InterlockedExchange(&g_chalDirty, 1);
             *(unsigned char*)G_MENU_REBUILD = 1;
         }
@@ -2421,10 +2559,11 @@ static void EnableLooseFilePriority() {
 // ------------------------- crash logger ------------------------------------
 // Vectored handler: on AV, log EIP + ebp-frame call chain to
 // br2mod_crash.log then let the game's own dialog run.
+static int g_crashTrace = 0;
 static LONG CALLBACK CrashLog(EXCEPTION_POINTERS* ep) {
     LONG traceResult = TraceException(ep);
     if (traceResult == EXCEPTION_CONTINUE_EXECUTION) return traceResult;
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+    if (!g_crashTrace || ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
         return EXCEPTION_CONTINUE_SEARCH;
     FILE* f;
     if (fopen_s(&f, "br2mod_crash.log", "w") != 0) return EXCEPTION_CONTINUE_SEARCH;
@@ -2489,12 +2628,16 @@ static void LoadConfig() {
     g_chainTrace = GetPrivateProfileIntA("Diagnostics","ChainTrace",0,".\\br2mod.ini");
     g_diffTrace = GetPrivateProfileIntA("Diagnostics","DifficultyTrace",0,".\\br2mod.ini");
     g_trigTrace = GetPrivateProfileIntA("Diagnostics","TrigTrace",0,".\\br2mod.ini");
+    g_crashTrace = GetPrivateProfileIntA("Diagnostics","CrashTrace",0,".\\br2mod.ini");
+    g_sfxTrace = GetPrivateProfileIntA("Diagnostics","SfxTrace",0,".\\br2mod.ini");
+
     char buf[64];
     GetPrivateProfileStringA("Difficulty", "preset", "Dhampir",
                              buf, sizeof buf, ".\\br2mod.ini");
     for (int i = 0; i < NUM_PRESETS; ++i)
         if (!_stricmp(buf, PRESETS[i].name)) g_diff = i;
-    GetPrivateProfileStringA("Combat", "mode", "Normal", buf, sizeof buf, ".\\br2mod.ini");
+    GetPrivateProfileStringA("Combat", "mode", COMBAT_NAMES[CombatEnhanced],
+                             buf, sizeof buf, ".\\br2mod.ini");
     g_combat = !_stricmp(buf, "Enhanced") ? CombatEnhanced : CombatNormal;
     for (int effect = 0; effect < EffectCount; ++effect)
         if (!GetPrivateProfileIntA("Combat", COMBAT_EFFECTS[effect].key, 1, ".\\br2mod.ini"))
@@ -2510,11 +2653,42 @@ static void LoadConfig() {
                              OutfitFileExists("data\\br2_dhampir_player.skb") &&
                              OutfitFileExists("models\\br2_dhampir_player.jug") &&
                              OutfitFileExists("models\\br2_dhampir_blades.smb");
-        char character[16];
+        g_dhampirMAvailable = OutfitFileExists("models\\br2_dhampir_m_player.bfm") &&
+                              OutfitFileExists("data\\br2_dhampir_m_player.skb") &&
+                              OutfitFileExists("models\\br2_dhampir_m_player.jug") &&
+                              OutfitFileExists("models\\br2_dhampir_scimitar.smb");
+        g_ephemeraAvailable = OutfitFileExists("models\\br2_ephemera_player.bfm") &&
+                              OutfitFileExists("data\\br2_ephemera_player.skb") &&
+                              OutfitFileExists("models\\br2_ephemera_player.jug") &&
+                              OutfitFileExists("models\\br2_dhampir_blades.smb");
+        g_kestralAvailable = OutfitFileExists("models\\br2_kestral_player.bfm") &&
+                             OutfitFileExists("data\\br2_kestral_player.skb") &&
+                             OutfitFileExists("models\\br2_kestral_player.jug") &&
+                             OutfitFileExists("models\\br2_dhampir_blades.smb");
+        g_kaganAvailable = OutfitFileExists("models\\br2_kagan_player.bfm") &&
+                           OutfitFileExists("data\\br2_kagan_player.skb") &&
+                           OutfitFileExists("models\\br2_kagan_player.jug") &&
+                           OutfitFileExists("models\\br2_kagan_sword.smb");
+        g_ninjaFAvailable = OutfitFileExists("models\\br2_ninjaf_player.bfm") &&
+                            OutfitFileExists("data\\br2_ninjaf_player.skb") &&
+                            OutfitFileExists("models\\br2_ninjaf_player.jug") &&
+                            OutfitFileExists("models\\br2_ninja_blade.smb");
+        g_ninjaMAvailable = OutfitFileExists("models\\br2_ninjam_player.bfm") &&
+                            OutfitFileExists("data\\br2_ninjam_player.skb") &&
+                            OutfitFileExists("models\\br2_ninjam_player.jug") &&
+                            OutfitFileExists("models\\br2_ninja_blade.smb");
+        char character[32];
         GetPrivateProfileStringA("Challenge", "character", "Rayne", character,
                                  sizeof character, ".\\br2mod.ini");
         g_character = !_stricmp(character, "Ferril") ? ChallengeFerril :
-                      !_stricmp(character, "Dhampir") ? ChallengeDhampir : ChallengeRayne;
+                      !_stricmp(character, "DhampirM") || !_stricmp(character, "Dhampir (Male)") ? ChallengeDhampirM :
+                      !_stricmp(character, "Dhampir") || !_stricmp(character, "Dhampir (Female)") ? ChallengeDhampir :
+                      !_stricmp(character, "Ephemera") ? ChallengeEphemera :
+                      !_stricmp(character, "Kestral") ? ChallengeKestral :
+                      !_stricmp(character, "Kagan") ? ChallengeKagan :
+                      !_stricmp(character, "NinjaF") || !_stricmp(character, "Ninja (Female)") ? ChallengeNinjaF :
+                      !_stricmp(character, "NinjaM") || !_stricmp(character, "Ninja (Male)") ? ChallengeNinjaM :
+                      ChallengeRayne;
         if (!ChallengeCharacterAvailable((ChallengeCharacter)g_character))
             g_character = ChallengeRayne;
         int n = GetPrivateProfileIntA("Challenge", "count", 25,
@@ -2544,8 +2718,11 @@ static DWORD WINAPI Worker(LPVOID) {
         PatchChecked(0x57A200,"\x55\x8b\xec\x6a\xff\x68\x72\x2b\x6d\x00",10,HookSituationTrace);
         PatchChecked(0x4A2B20,"\x55\x8b\xec\x81\xec\x04\x01\x00\x00",9,HookEffectRegisterTrace);
         PatchChecked(0x4A2953,"\x8b\x45\x08\x50\x53\x8b\xce",7,HookEffectLoadTrace);
-        PatchChecked(0x559F10,"\xa1\xac\x48\xef\x05\x83\xf8\x01",8,HookMenuBack);
     }
+    if (g_traceEnabled || g_sfxTrace) {
+        PatchChecked(0x621CC0,"\x55\x8b\xec\x81\xec\x00\x01\x00\x00",9,HookSfxStartTrace);
+    }
+    PatchChecked(0x559F10,"\xa1\xac\x48\xef\x05\x83\xf8\x01",8,HookMenuBack);
     PatchChecked(0x55EB10,"\x55\x8b\xec\x6a\xff\x68\xf5\x27\x6d\x00",10,HookMenuBegin);
     PatchChecked(0x609D90,"\x55\x8b\xec\x56\x8b\xf1",6,HookFeedMotionRequest);
     PatchChecked(0x56A170,"\x55\x8b\xec\x8b\x45\x08",6,HookGetBonePos);
@@ -2566,6 +2743,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchCallChecked(0x4F44FF,"\xE8\x7C\x52\x15\x00",5,HookParryWorldFactor);
     PatchCallChecked(0x6498D8,"\xE8\x63\xFD\xFF\xFF",5,HookParryActorFactor);
     PatchChecked(0x551206,"\x53\x8B\xCE\xE8\xE2\x7A\x11\x00",8,HookParryContact);
+    PatchCallChecked(0x551256,"\xE8\xA5\x52\xFA\xFF",5,HookChallengeIncomingScale);
     // Native character update calls that advance the actor using its +0x590 channel.
     PatchCallChecked(0x479DF0,"\xE8\xEB\xFA\x1C\x00",5,HookEnhancedActorUpdate);
     PatchCallChecked(0x4823CF,"\xE8\x0C\x75\x1C\x00",5,HookEnhancedActorUpdate);
@@ -2642,14 +2820,25 @@ static DWORD WINAPI Worker(LPVOID) {
     InstallFerrilTattoo();
     PatchCallChecked(0x594EAE,"\xE8\x8D\xF6\xFF\xFF",5,HookRayneFeedWarning);
     PatchVtableSlot(0x703508, 0x4032B0, (DWORD)HookChallengeVoice, "Challenge player voice");
+    PatchVtableSlot(0x7035B0, 0x446140, (DWORD)HookChallengeAnimationSound, "Challenge animation sound");
     PatchVtableSlot(0x703720, 0x551D30, (DWORD)HookRayneTaunt, "Rayne taunt");
-    if (g_ferrilAvailable) {
+    PatchCallChecked(0x67718B,"\xE8\x00\xC5\xFE\xFF",5,HookFerrilFeedOrHarpoon);
+    if (g_ephemeraAvailable) {
+        PatchVtableSlot(0x6E036C, 0x424150, (DWORD)HookEphemeraBladeTrail, "Ephemera blade trail");
+        if (*(const DWORD*)0x6E036C == (DWORD)HookEphemeraBladeTrail)
+            PatchCallChecked(0x4073D9,"\xE8\x12\x62\x17\x00",5,HookEphemeraBladeMesh);
+    }
+    if (g_ferrilAvailable || g_kaganAvailable || g_ninjaFAvailable || g_ninjaMAvailable)
+        PatchVtableSlot(0x6DD644, 0x407390, (DWORD)HookChallengeBladeRender, "Challenge blade visibility");
+    if (g_ferrilAvailable || g_ninjaFAvailable || g_ninjaMAvailable) {
         PatchCallChecked(0x5532C5,"\xE8\x66\xEC\x11\x00",5,HookFerrilMelee);
         PatchCallChecked(0x673C75,"\xE8\xB6\xE2\xFF\xFF",5,HookFerrilMelee);
+    }
+    if (g_kaganAvailable || g_ninjaFAvailable || g_ninjaMAvailable)
+        PatchCallChecked(0x672024,"\xE8\x07\x4F\xFF\xFF",5,HookChallengeLeftBladeQuery);
+    if (g_ferrilAvailable) {
         PatchCallChecked(0x6714AD,"\xE8\x5E\x6F\xF9\xFF",5,FerrilContactPosition);
         PatchCallChecked(0x67178B,"\xE8\x90\x68\xF7\xFF",5,HookFerrilMeleeQuery);
-        PatchCallChecked(0x67718B,"\xE8\x00\xC5\xFE\xFF",5,HookFerrilFeedOrHarpoon);
-        PatchVtableSlot(0x6DD644, 0x407390, (DWORD)HookFerrilBladeRender, "Ferril blade visibility");
     }
     // These were diagnostic workarounds for the wrong-this corruption now
     // fixed in HookA. VirtualQuery on every stricmp dominated character load.

@@ -125,6 +125,11 @@ T = {
  # --- opciones globales ---
  "Skin":                {"ES":"Apariencia","DE":"Aussehen","FR":"Apparence","IT":"Aspetto","RU":"Облик"},
  "Default":             {"ES":"Por defecto","DE":"Standard","FR":"Par défaut","IT":"Predefinito","RU":"По умолчанию"},
+ "Kagan":               {"ES":"Kagan","DE":"Kagan","FR":"Kagan","IT":"Kagan","RU":"Каган"},
+ "Dhampir (Female)":    {"ES":"Dhampir (Mujer)","DE":"Dhampir (Weiblich)","FR":"Dhampir (Femelle)","IT":"Dhampir (Femmina)","RU":"Дампир (женский)"},
+ "Dhampir (Male)":      {"ES":"Dhampir (Hombre)","DE":"Dhampir (Männlich)","FR":"Dhampir (Mâle)","IT":"Dhampir (Maschio)","RU":"Дампир (мужской)"},
+ "Ninja (Female)":      {"ES":"Ninja (Mujer)","DE":"Ninja (Weiblich)","FR":"Ninja (Femelle)","IT":"Ninja (Femmina)","RU":"Ниндзя (женская)"},
+ "Ninja (Male)":        {"ES":"Ninja (Hombre)","DE":"Ninja (Männlich)","FR":"Ninja (Mâle)","IT":"Ninja (Maschio)","RU":"Ниндзя (мужской)"},
 }
 ENC = {"ES":"cp1252","DE":"cp1252","FR":"cp1252","IT":"cp1252","RU":"cp1251"}
 

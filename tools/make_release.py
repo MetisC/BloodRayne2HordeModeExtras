@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """make_release.py — build the end-user release zip for Nexus/GitHub.
 
-Packages ONLY mod files: the proxy DLL, default config, generated world
-levels, menu scene, per-language msglist and two text guides. No stock game
-files, no runtime files (br2mod_times.ini), no dev artifacts (.TXT deps).
+Packages the proxy DLL, default config, generated levels, challenge
+character and appearance assets, menu scene, localization and two text guides. Keeps
+stock archives, player records and developer artifacts out of the zip.
 
 Usage:
   python tools/make_release.py --game "H:\GOG\BloodRayne 2 Terminal Cut" ^
@@ -25,6 +25,21 @@ RETITLED = ["A1_MANSION_PART1_BATTLE_%s" % n for n in ("EASY", "NORMAL", "HARD")
 SCENE    = ["menu_level", "HUB5"]
 LANGS    = ["DE", "ES", "FR", "IT", "RU"]
 
+CHALLENGE_MODELS = (
+    "br2_ferril_player", "br2_dhampir_player", "br2_dhampir_m_player",
+    "br2_ephemera_player", "br2_kestral_player", "br2_kagan_player",
+    "br2_ninjaf_player", "br2_ninjam_player",
+)
+CHALLENGE_WEAPONS = (
+    "br2_dhampir_blades", "br2_dhampir_scimitar", "br2_kagan_sword", "br2_ninja_blade",
+)
+CHALLENGE_ANIMATIONS = (
+    "br2_ephemera/dead", "br2_ephemera/death", "br2_ephemera/flurry",
+    "br2_kestral/combo3", "br2_kagan/shockwave",
+    "br2_ninjam/death", "br2_ninjam/dead",
+    "br2_kagan/hurtfront", "br2_kagan/hurtback", "br2_kagan/hurtleft", "br2_kagan/hurtright",
+)
+
 README_TXT = """BloodRayne 2: Terminal Cut - Challenge Mode & Extras (br2mod)
 ================================================================
 
@@ -36,6 +51,9 @@ best times), a global Difficulty preset selector under Options
 (including a Custom preset driven by br2mod.ini), a global Skin
 selector, and localized mod strings for all six game languages.
 Challenge runs offer Base or Maximum health and rage capacity.
+The Character option selects the fighter for a challenge run.
+Fighters have individual damage and resistance multipliers in Challenge
+Mode, applied before difficulty. Updated fighters use new record sections.
 Photo Mode is available from Pause or via F12 / L3+R3 in gameplay.
 Enhanced combat adds a timed parry and follow-up, hitstop, recovery
 protection, a combo counter, style ranks from D to V, and cinematic
@@ -59,6 +77,8 @@ INSTALL
      - br2mod.ini
      - br2mod_combat.ini
      - world\\  (whole folder)
+     - data\\ and models\\  (challenge characters, equipment and appearances)
+     - animations\\  (challenge character moves)
 2. If you already have a dinput8.dll (another proxy mod), back it up
    first - only one dinput8 proxy can be loaded.
 3. If upgrading, keep br2mod.ini to retain your selections. The new
@@ -70,7 +90,7 @@ INSTALL
 
 UNINSTALL
 ---------
-Delete dinput8.dll and the files this zip added under world\\.
+Delete dinput8.dll and the files this zip added under world\\, data\\, models\\ and animations\\.
 Your save games and POD archives are never touched. br2mod_times.ini
 (challenge records) may be deleted to reset them.
 
@@ -82,6 +102,9 @@ opcionales, mejores tiempos), un selector global de Dificultad en
 Opciones (incluido un preset Custom en br2mod.ini), un selector global
 de Skin, y cadenas del mod traducidas a los seis idiomas del juego.
 En Desafio puedes elegir capacidad de vida y furia Base o Maxima.
+La opcion Personaje selecciona quien lucha en la arena.
+Cada luchador tiene ajustes de dano y resistencia en Desafio, antes de
+la dificultad. Los luchadores ajustados usan secciones nuevas de records.
 Modo Foto se abre desde Pausa o con F12 / L3+R3 en partida.
 Combate Mejorado anade parry y replica, hitstop, proteccion tras
 recibir dano, contador de combos, rangos de estilo de D a V y
@@ -105,6 +128,8 @@ INSTALACION
      - br2mod.ini
      - br2mod_combat.ini
      - world\\  (carpeta completa)
+     - data\\ y models\\  (personajes de Desafio, equipo y apariencias)
+     - animations\\  (movimientos de los personajes de Desafio)
 2. Si ya tienes un dinput8.dll (otro mod proxy), haz copia antes:
    solo puede cargarse un proxy dinput8.
 3. Si actualizas, conserva br2mod.ini para mantener tus selecciones.
@@ -116,7 +141,7 @@ INSTALACION
 
 DESINSTALAR
 -----------
-Borra dinput8.dll y los ficheros que el zip anadio en world\\.
+Borra dinput8.dll y los ficheros que el zip anadio en world\\, data\\, models\\ y animations\\.
 Las partidas guardadas y los POD originales nunca se tocan.
 br2mod_times.ini puede borrarse para reiniciar los records de Desafio.
 """
@@ -196,6 +221,24 @@ def main():
     items.append((dll, "dinput8.dll"))
     items.append((os.path.join(ROOT, "br2mod.ini"), "br2mod.ini"))
     items.append((os.path.join(ROOT, "br2mod_combat.ini"), "br2mod_combat.ini"))
+
+    assets = [f"{folder}/{name}.{ext}"
+              for name in CHALLENGE_MODELS
+              for folder, ext in (("data", "skb"), ("models", "bfm"), ("models", "jug"))
+              if not (name == "br2_ferril_player" and ext == "jug")]
+    assets.extend(f"models/{name}.smb" for name in CHALLENGE_WEAPONS)
+    assets.extend(f"animations/{name}.ani" for name in CHALLENGE_ANIMATIONS)
+    source = (Path(ROOT) / "br2mod.cpp").read_text(encoding="utf-8")
+    outfits = source.split("static constexpr ModOutfit ModOutfits[] = {", 1)[1].split("\n};", 1)[0]
+    appearance_files = re.findall(r'"((?:models|data)\\\\[^"]+)"', outfits)
+    if not appearance_files:
+        sys.exit("No appearance assets found in ModOutfits")
+    assets.extend(dict.fromkeys(name.replace("\\\\", "/") for name in appearance_files))
+    for asset in assets:
+        src = os.path.join(game, asset)
+        if not os.path.isfile(src):
+            sys.exit("missing challenge character asset " + asset)
+        items.append((src, asset))
 
     world = os.path.join(game, "world")
     for base in GENERATED + RETITLED + SCENE:

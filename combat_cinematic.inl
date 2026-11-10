@@ -22,7 +22,10 @@ BYTE __fastcall HookCinematicDetach(BYTE* target, void*, void* limb, int part, i
     return detached;
 }
 
-DWORD __fastcall DispatchCinematicDamage(BYTE* target, BYTE* hit) {
+static void RecordOutgoingHit(BYTE* rayne, BYTE* victim, const BYTE* hit,
+                              float damage, bool confirmedMeleeContact);
+
+static DWORD DispatchCinematicDamageNative(BYTE* target, BYTE* hit) {
     using ReceiveDamage = DWORD (__thiscall*)(BYTE*, BYTE*);
     const auto receive = (*(ReceiveDamage**)target)[0x3C / sizeof(DWORD)];
     if (SuppressFeedEscapeHit(target, hit)) return 0;
@@ -60,6 +63,41 @@ DWORD __fastcall DispatchCinematicDamage(BYTE* target, BYTE* hit) {
         LogParry(severed ? "dismember-cinematic" : "ground-cinematic", 0, type,
                  *(int*)(hit + 8), state, 0, id, target, rayne, 0, (float)contact.part,
                  *(float*)(hit + 0x6C));
+    }
+    return result;
+}
+
+DWORD __fastcall DispatchCinematicDamage(BYTE* target, BYTE* hit) {
+    BYTE* player = *(BYTE**)RayneActor;
+    if (!player || target == player || *(BYTE**)(hit + 0x24) != player)
+        return DispatchCinematicDamageNative(target, hit);
+
+    const auto character = ActiveChallengeCharacter();
+    const int type = *(const int*)hit;
+    const bool melee = IsMeleeImpact(type);
+    const bool ephemera = melee && character == ChallengeEphemera;
+    const bool triangle = *(const int*)(player + 0x17C) == ChallengeTriangleState;
+    const bool observe = ephemera || (melee && character == ChallengeKestral && triangle);
+    const float scale = ChallengeDamage[character].dealt;
+    if ((!observe && scale == 1.0f) || !CombatCharacter(target))
+        return DispatchCinematicDamageNative(target, hit);
+
+    const float healthBefore = *(const float*)(target + 0x39C8);
+    if (!(healthBefore > 0.0f)) return DispatchCinematicDamageNative(target, hit);
+
+    float& damage = *(float*)(hit + 0x0C);
+    const float base = damage;
+    if (ephemera) damage *= triangle ? 1.35f : 1.25f;
+    const bool scaleHit = scale != 1.0f && damage > 0.0f && type != 0x87;
+    if (scaleHit) damage *= scale;
+    const DWORD result = DispatchCinematicDamageNative(target, hit);
+    if (ephemera || scaleHit) damage = base;
+
+    // These moves can apply damage without the native outgoing notification.
+    if (observe) {
+        const float applied = healthBefore - *(const float*)(target + 0x39C8);
+        const float reported = hit[0x68] ? *(const float*)(hit + 0x6C) : 0.0f;
+        RecordOutgoingHit(player, target, hit, max(applied, reported), true);
     }
     return result;
 }

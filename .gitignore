@@ -13,3 +13,4 @@ br2mod-combat-test.obj
 br2mod-combat-test.lib
 br2mod-combat-test.exp
 validation-combat-test.txt
+*.bak
