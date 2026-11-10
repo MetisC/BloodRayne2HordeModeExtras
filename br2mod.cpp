@@ -84,6 +84,8 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define MENU_OPTIONS   0x17
 #define MENU_CHALLENGE 0x3D        // free slot -> lands on hooked epilogue
 #define MENU_EFFECTS   0x3E        // second free slot, same builder epilogue
+#define MENU_SKINS     0x33        // third free slot, same builder epilogue
+                                   // (0x09 is natively auto-popped by FUN_00566b70)
 
 // Action codes >= 0x110: natives stop at 0x10C, zero collisions.
 #define AC_CHALLENGE_MENU 0x110
@@ -99,6 +101,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_PHOTO          0x11E
 #define AC_EXTRA_BASE     0x120    // 0x120.. extra launches
 #define AC_ARENA_BASE     0x130    // 0x130.. arena launches at selected count
+#define AC_SKIN_PICK_BASE 0x140    // 0x140.. skin list picks
 
 // ----------------------------- data ---------------------------------------
 struct Preset { const char* name; float dmgIn, dmgOut, cost; };
@@ -189,6 +192,8 @@ typedef unsigned int (__cdecl *GetOutfitIndex_t)(void);
 static int  g_skinCount = 0;
 static int  g_skinIdx = 0;                   // selected index into g_skinOrder
 static int  g_skinId = 0;                    // resolved outfit id (0=default)
+static int  g_skinsNeedSelect = 0;           // one-shot cursor placement on open
+static DWORD g_skinsOpenedAt = 0;            // debounce for held confirm input
 static int  g_nativeOutfit = -1;             // last game-written +0x3CC (-1=none)
 static int  g_lastWrote = -1;                // our last +0x3CC write (-1=none)
 static char g_skinIni[40] = "default";
@@ -342,6 +347,42 @@ static const char* __cdecl GetPlayerOutfitPhysics() {
     const auto* outfit = FindModOutfit(g_skinId);
     return outfit ? outfit->physics : ((const char* (__cdecl*)())0x4F69C0)();
 }
+
+typedef const char* (__cdecl *Localize_t)(const char*);
+static Localize_t Localize = (Localize_t)FN_LOCALIZE;
+static const char* ModLocalize(const char* key, bool useNativeTable = true);
+
+// Display label for one entry of g_skinOrder (Default/native/mod outfit),
+// with the mod outfit's numeric suffix appended when present.
+static void SkinDisplayName(int id, char* out, int outSize) {
+    const auto* outfit = FindModOutfit(id);
+    const char* name;
+    if (outfit) {
+        // Custom labels use only the mod's translations, away from native UI keys.
+        name = ModLocalize(outfit->label, false);
+    } else if (id) {
+        const char* raw = GetDisplayNameN(id);
+        const char* loc = raw ? Localize(raw) : 0;
+        name = loc ? loc : raw;
+    } else {
+        name = ModLocalize("Default");
+    }
+    _snprintf(out, outSize - 1, "%s%s", name ? name : "?",
+              outfit && outfit->labelSuffix ? outfit->labelSuffix : "");
+    out[outSize - 1] = 0;
+}
+
+// Apply g_skinOrder[i] as the current skin and persist the pick.
+static void ApplySkinIndex(int i) {
+    const char* nm;
+    g_skinIdx = i;
+    g_skinId = g_skinOrder[i];
+    nm = g_skinId ? SkinInternalName(g_skinId) : "default";
+    strncpy(g_skinIni, nm, sizeof g_skinIni - 1);
+    g_skinIni[sizeof g_skinIni - 1] = 0;
+    InterlockedExchange(&g_skinDirty, 1);
+    ApplySkinForce();               // field write -> engine hot-swaps the model
+}
 // `call GetOutfitIndex` sites inside the path getters (Dfm/Gun/Jug/Blade/
 // Harpoon/InternalName/DisplayName-current variants).
 static const DWORD OUTFIT_INDEX_CALLS[] = {
@@ -441,6 +482,27 @@ static void __declspec(naked) HookMenuBegin() {
     }
 }
 
+// Diagnostic: log who called MenuBack (the native pop). The patched prologue
+// lands us with [esp] = caller return address before we touch the stack.
+static void __cdecl LogMenuBackCaller(DWORD ret) {
+    Trace("MENUBACK caller=%08lX state=%lu depth=%lu sel=%lu",
+          ret, ReadWord(G_MENU_STATE), ReadWord(0x5EF48AC), ReadWord(G_SELIDX));
+}
+static void __declspec(naked) HookMenuBack() {
+    __asm {
+        mov eax, dword ptr [esp]
+        pushad
+        push eax
+        call LogMenuBackCaller
+        pop eax
+        popad
+        mov eax, dword ptr ds:[0x5EF48AC]   // ds: forces memory, not imm
+        cmp eax, 1
+        push 0x559F18
+        ret
+    }
+}
+
 static bool g_challengeSession;
 static bool g_photoBlockingMenu;
 static int __cdecl FinishStandaloneSession() {
@@ -513,8 +575,6 @@ static int __cdecl SuppressStandaloneSavePrompt() {
 }
 
 // ------------------------- kill counter -------------------------------------
-typedef const char* (__cdecl *Localize_t)(const char*);
-static Localize_t Localize = (Localize_t)FN_LOCALIZE;
 
 // Fallback localization for the mod's own keys. The game's msglist is loaded
 // once at boot from world\<lang>\msglist.txt -- but the loose file sometimes
@@ -576,7 +636,7 @@ static int DetectLang(void) {
     if (!strcmp(e, "\xC2\xF0\xE0\xE3\xE8")) return 7;         // RU "Враги" cp1251
     return 1;                                                 // EN/JA/unknown
 }
-static const char* ModLocalize(const char* key, bool useNativeTable = true) {
+static const char* ModLocalize(const char* key, bool useNativeTable) {
     const char* r = useNativeTable ? Localize(key) : nullptr;
     if (r && strcmp(r, key)) return r;          // table resolved -> use it
     int i, lang = DetectLang();
@@ -1255,21 +1315,34 @@ static void __cdecl OnMenuBuilt() {
         EnsureSkinOrder();
         {
             static char sbuf[96];
-            const char* sname;
-            const auto* outfit = FindModOutfit(g_skinId);
-            if (outfit) {
-                // Custom labels use only the mod's translations, away from native UI keys.
-                sname = ModLocalize(outfit->label, false);
-            } else if (g_skinId) {
-                const char* raw = GetDisplayNameN(g_skinId);
-                const char* loc = raw ? Localize(raw) : 0;
-                sname = loc ? loc : raw;
-            } else {
-                sname = ModLocalize("Default");
-            }
-            const char* suffix = outfit && outfit->labelSuffix ? outfit->labelSuffix : "";
-            sprintf(sbuf, "%s: %s%s", ModLocalize("Skin"), sname ? sname : "?", suffix);
+            char name[72];
+            SkinDisplayName(g_skinId, name, sizeof name);
+            _snprintf(sbuf, sizeof sbuf - 1, "%s: %s", ModLocalize("Skin"), name);
+            sbuf[sizeof sbuf - 1] = 0;
             AddMenuItem(sbuf, AC_SKIN, 0);
+        }
+        break;
+    }
+    case MENU_SKINS: {
+        // Menu 0x33 rebuilds every frame (native dynamic-menu quirk, like
+        // cheats 0x35): never touch G_SELIDX here or the cursor snaps back.
+        strcpy_s((char*)0x5EEDAC8, 72, ModLocalize("Skin"));
+        *(unsigned char*)G_MENU_REBUILD = 1; // triggers centered-panel layout
+        *(int*)0x5EF5640 = 2;
+        *(int*)0x5EF5638 = 7;      // visible rows, same as native list menus
+        EnsureSkinOrder();
+        for (int i = 0; i < g_skinCount; ++i) {
+            char name[72], row[80];
+            SkinDisplayName(g_skinOrder[i], name, sizeof name);
+            _snprintf(row, sizeof row - 1, "%s%s", name,
+                      i == g_skinIdx ? "  *" : "");
+            row[sizeof row - 1] = 0;
+            AddMenuItem(row, AC_SKIN_PICK_BASE + i, 0);
+        }
+        AddMenuItem(ModLocalize("Back"), AC_BACK, 0);
+        if (g_skinsNeedSelect) {   // one-shot: land cursor on current skin
+            g_skinsNeedSelect = 0;
+            *(int*)G_SELIDX = g_skinIdx;
         }
         break;
     }
@@ -1397,17 +1470,20 @@ static int __cdecl DispatchOurs(int action) {
     }
     if (action == AC_SKIN) {
         EnsureSkinOrder();
-        if (g_skinCount > 1) {
-            const char* nm;
-            g_skinIdx = (g_skinIdx + 1) % g_skinCount;
-            g_skinId = g_skinOrder[g_skinIdx];
-            nm = g_skinId ? SkinInternalName(g_skinId) : "default";
-            strncpy(g_skinIni, nm, sizeof g_skinIni - 1);
-            g_skinIni[sizeof g_skinIni - 1] = 0;
-            InterlockedExchange(&g_skinDirty, 1);
-            ApplySkinForce();       // field write -> engine hot-swaps the model
+        if (g_skinCount > 1 && *(int*)G_MENU_STATE == MENU_OPTIONS) {
+            g_skinsNeedSelect = 1;
+            g_skinsOpenedAt = GetTickCount();
+            CallMenu(MENU_SKINS);
         }
-        *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
+    if (action >= AC_SKIN_PICK_BASE && action < AC_SKIN_PICK_BASE + g_skinCount) {
+        if (*(int*)G_MENU_STATE == MENU_SKINS
+            && GetTickCount() - g_skinsOpenedAt > 200) { // swallow held confirm
+            ApplySkinIndex(action - AC_SKIN_PICK_BASE);
+            MenuBack();
+            *(unsigned char*)G_MENU_REBUILD = 1;
+        }
         return 0;
     }
     if (action == AC_COUNT_CYCLE) {
@@ -1550,7 +1626,7 @@ static void __declspec(naked) HookB() {
     __asm {
         cmp edi, AC_CHALLENGE_MENU
         jb  orig
-        cmp edi, AC_EXTRA_BASE + 0x20
+        cmp edi, AC_SKIN_PICK_BASE + 0x40
         jae orig
         pushad
         push edi
@@ -2059,6 +2135,7 @@ static DWORD WINAPI Worker(LPVOID) {
         PatchChecked(0x57A200,"\x55\x8b\xec\x6a\xff\x68\x72\x2b\x6d\x00",10,HookSituationTrace);
         PatchChecked(0x4A2B20,"\x55\x8b\xec\x81\xec\x04\x01\x00\x00",9,HookEffectRegisterTrace);
         PatchChecked(0x4A2953,"\x8b\x45\x08\x50\x53\x8b\xce",7,HookEffectLoadTrace);
+        PatchChecked(0x559F10,"\xa1\xac\x48\xef\x05\x83\xf8\x01",8,HookMenuBack);
     }
     PatchChecked(0x55EB10,"\x55\x8b\xec\x6a\xff\x68\xf5\x27\x6d\x00",10,HookMenuBegin);
     PatchChecked(0x609D90,"\x55\x8b\xec\x56\x8b\xf1",6,HookFeedMotionRequest);
@@ -2068,6 +2145,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchSite((void*)0x5670E1, 12, HookB);
     EnableSubmenuCancel(MENU_CHALLENGE, 0x0A);
     EnableSubmenuCancel(MENU_EFFECTS, 0x0B);
+    EnableSubmenuCancel(MENU_SKINS, 0x0B);
     PatchChecked(0x566430,"\xd9\xee\xd8\x1d\xb4\x02\x03\x06",8,HookSavePrompt);
     PatchCallChecked(0x4F83A9,"\xE8\x12\xEE\xFF\xFF",5,HookHudRender);
     PatchChecked(0x4F7AF9,"\x6A\x00\xE8\xD0\xA4\x06\x00",7,HookChallengePause);
