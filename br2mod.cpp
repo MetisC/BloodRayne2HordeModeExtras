@@ -1980,6 +1980,252 @@ static void __declspec(naked) HookRegPrune() {
     }
 }
 
+// ------------------------- ferril tattoo animation -------------------------
+// br2_ferril carries CFerril's 30 "cage*" tattoo overlay parts. Their
+// materials are flagged "texture bound by caller", so the plain body draw
+// shows every layer at once with an unbound texture. Native CFerril::render
+// (0x4D9230) hides all tattoo parts, draws the body, then replays each layer
+// in its own pass with the right frame texture bound and a sqrt
+// cross-dissolve between consecutive frames (phases advance in
+// CFerril::think at 8 frames/second). We replicate that on the player while
+// the Ferril skin (outfit id 0x4252E023) is active, statelessly from the
+// scaled game clock at 0x5EEDAB0 (pauses with the game, honours slow-mo).
+typedef void (__fastcall *SetPartVisible_t)(void*, void*, int, int);
+typedef int  (__fastcall *IsPartVisible_t)(void*, void*, int);
+typedef int  (__fastcall *PartCount_t)(void*, void*);
+typedef void*(__fastcall *GetModel_t)(void*, void*);
+typedef int  (__fastcall *FindPartByName_t)(void*, void*, const char*, int);
+typedef void (__fastcall *DrawVisibleMeshes_t)(void*, void*);
+typedef void (__cdecl *BindTexture_t)(const void*, int);
+typedef void (__cdecl *SetAlpha_t)(float);
+typedef void (__cdecl *SetIntState_t)(int);
+typedef void (__fastcall *BeginActorTransform_t)(void*, void*);
+typedef void (__cdecl *EndActorTransform_t)(void);
+typedef int  (__fastcall *IsSpecialPass_t)(void*, void*);
+typedef int  (__fastcall *MgrIsVisible_t)(void*, void*, const void*);
+static SetPartVisible_t      SetPartVisible      = (SetPartVisible_t)0x606950;
+static IsPartVisible_t       IsPartVisible       = (IsPartVisible_t)0x606920;
+static PartCount_t           PartCount           = (PartCount_t)0x6088F0;
+static GetModel_t            GetModel            = (GetModel_t)0x606760;
+static FindPartByName_t      FindPartByName      = (FindPartByName_t)0x605810;
+static DrawVisibleMeshes_t   DrawVisibleMeshes   = (DrawVisibleMeshes_t)0x448E30;
+static BindTexture_t         BindTexture         = (BindTexture_t)0x6487D0;
+static SetAlpha_t            SetAlpha            = (SetAlpha_t)0x56D360;
+static SetIntState_t         SetModeA            = (SetIntState_t)0x56D340;
+static SetIntState_t         SetModeB            = (SetIntState_t)0x56D460;
+static SetIntState_t         SetFlagC            = (SetIntState_t)0x646BB0;
+static SetIntState_t         SetRenderFlags      = (SetIntState_t)0x56D2F0;
+static BeginActorTransform_t BeginActorTransform = (BeginActorTransform_t)0x4031C0;
+static EndActorTransform_t   EndActorTransform   = (EndActorTransform_t)0x4031E0;
+static IsSpecialPass_t       IsSpecialPass       = (IsSpecialPass_t)0x5E0810;
+static MgrIsVisible_t        MgrIsVisible        = (MgrIsVisible_t)0x5E2740;
+#define G_RENDER_MGR     0x7C5D50
+#define G_RENDER_DIRTY   0x5F09EBC   // render-state dirty flag (write 1/0)
+#define G_RENDER_TO_TEX  0x5F0A6F8   // render-to-texture flag (skip passes)
+#define G_GAME_CLOCK     0x5EEDAB0   // accumulated scaled game seconds
+
+// Texture records in the exe .data (0x48-byte records, name at +8).
+#define FERRIL_TEX_C     0x7BFB08            // ferril_tat_03x.tif (hit flash)
+#define FERRIL_TEX_A     0x7BFB50            // +0x48*k, k = 0..7  (tat_02_NN)
+#define FERRIL_TEX_B     0x7BFD90            // +0x48*k, k = 0..15 (tat_01_NN)
+
+static const char* const TATTOO_PARTS_A[] = {
+    "cage01_larm", "cage01_lforearm", "cage01_lshin", "cage01_lthigh",
+    "cage01_rforearm", "cage01_rshin", "cage01_rthigh",
+    "cage02_larm", "cage02_lforearm", "cage02_lshin", "cage02_lthigh",
+    "cage02_rarm", "cage02_rforearm", "cage02_rshin", "cage02_rthigh",
+    // Native CFerril forgets this part in its Set A (its right arm misses the
+    // cage01 overlay); kept for left/right symmetry, drop to match stock.
+    "cage01_rarm",
+};
+static const char* const TATTOO_PARTS_B[] = {
+    "cagetorso_chest", "cagetorso_hips", "cagetorso_waist",
+};
+static const char* const TATTOO_PARTS_C[] = {
+    "cagebody_chest", "cagebody_hips", "cagebody_lforearm", "cagebody_lshin",
+    "cagebody_lthigh", "cagebody_rarm", "cagebody_rarm01", "cagebody_rforearm",
+    "cagebody_rshin", "cagebody_rthigh", "cagebody_waist",
+};
+#define TAT_A_BEGIN 0                             // Set A = 16 parts
+#define TAT_B_BEGIN 16                            // Set B = 3 parts
+#define TAT_C_BEGIN 19                            // Set C = 11 parts
+#define TAT_COUNT   30
+
+static int   g_ferrilTattoo = 1;              // [Appearance] ferrilTattoo
+static bool  g_ferrilTattooDead = false;      // SEH kill switch
+static bool  g_ferrilFirstPass = true;
+static float g_ferrilFlashAt = -1e9f;         // clock at last player hit
+static void* g_tattooModel = 0;               // model the handles belong to
+static void* g_tattooPreload = 0;             // model the textures were bound for
+static int   g_tattooHandles[TAT_COUNT];
+
+// Resolve and cache the 30 part indices for the current player model. The
+// model pointer changes on a skin hot-swap, so re-resolve whenever it does.
+static bool FerrilTattooResolve(void* ctrl) {
+    void* model = GetModel(ctrl, 0);
+    int n = model ? PartCount(ctrl, 0) : 0;
+    if (n <= 0 || n > 256) return false;
+    if (model == g_tattooModel) return true;
+    static const struct { const char* const* names; int count; } groups[] = {
+        {TATTOO_PARTS_A, TAT_B_BEGIN},
+        {TATTOO_PARTS_B, TAT_C_BEGIN - TAT_B_BEGIN},
+        {TATTOO_PARTS_C, TAT_COUNT - TAT_C_BEGIN},
+    };
+    int handles[TAT_COUNT], count = 0;
+    for (int g = 0; g < 3; ++g)
+        for (int i = 0; i < groups[g].count; ++i) {
+            // Third arg must be 0: non-zero raises the fatal "Can't find part"
+            // dialog when the model is not Ferril's yet (skin swap lag).
+            int h = FindPartByName(model, 0, groups[g].names[i], 0), j;
+            if (h < 0 || h >= n) return false;
+            for (j = 0; j < count && handles[j] != h; ++j);
+            if (j != count) return false;   // names must hit distinct parts
+            handles[count++] = h;
+        }
+    memcpy(g_tattooHandles, handles, sizeof handles);
+    g_tattooModel = model;
+    Trace("FERRIL tattoo handles resolved model=%08lX parts=%d", (DWORD)model, n);
+    return true;
+}
+
+// Explicit overlay passes, a literal transcription of CFerril::render
+// (0x4D9542..0x4D9C13): hide everything, show one layer, bind the frame
+// texture, draw, repeat with the next frame for the cross-dissolve.
+static void FerrilTattooPasses(void* actor, void* ctrl, int n, float acc) {
+    int snapshot[256];
+    BeginActorTransform(actor, 0);
+    void* model = GetModel(ctrl, 0);
+    if (model != g_tattooPreload) {           // CFerril preloads at construct
+        for (int k = 0; k < 8; ++k)  BindTexture((const void*)(FERRIL_TEX_A + 0x48 * k), 0);
+        for (int k = 0; k < 16; ++k) BindTexture((const void*)(FERRIL_TEX_B + 0x48 * k), 0);
+        BindTexture((const void*)FERRIL_TEX_C, 0);
+        g_tattooPreload = model;
+        Trace("FERRIL tattoo textures preloaded model=%08lX", (DWORD)model);
+    }
+    for (int i = 0; i < n; ++i) snapshot[i] = IsPartVisible(ctrl, 0, i);
+    double a = (double)acc * 8.0;
+    float t2 = (float)fmod(a, 8.0);           // Set A phase
+    float t1 = (float)fmod(a, 16.0);          // Set B phase
+
+    for (int i = 0; i < n; ++i) SetPartVisible(ctrl, 0, i, 0);
+    for (int i = TAT_A_BEGIN; i < TAT_B_BEGIN; ++i)
+        SetPartVisible(ctrl, 0, g_tattooHandles[i], 1);
+    float x = t2;
+    int k = (int)x & 7;
+    float frac = x - (int)x;
+    BindTexture((const void*)(FERRIL_TEX_A + 0x48 * k), 0);
+    SetModeB(0);
+    *(DWORD*)G_RENDER_DIRTY = 1;
+    SetFlagC(0);
+    SetAlpha(sqrtf(1.0f - frac));
+    DrawVisibleMeshes(actor, 0);
+    BindTexture((const void*)(FERRIL_TEX_A + 0x48 * ((k + 1) & 7)), 0);
+    SetAlpha(sqrtf(frac));
+    DrawVisibleMeshes(actor, 0);
+
+    for (int i = 0; i < n; ++i) SetPartVisible(ctrl, 0, i, 0);
+    for (int i = TAT_B_BEGIN; i < TAT_C_BEGIN; ++i)
+        SetPartVisible(ctrl, 0, g_tattooHandles[i], 1);
+    x = t1;
+    k = (int)x & 15;
+    frac = x - (int)x;
+    BindTexture((const void*)(FERRIL_TEX_B + 0x48 * k), 0);
+    SetModeB(0);
+    *(DWORD*)G_RENDER_DIRTY = 1;
+    SetFlagC(0);
+    SetModeA(0);
+    SetAlpha(sqrtf(1.0f - frac));
+    DrawVisibleMeshes(actor, 0);
+    BindTexture((const void*)(FERRIL_TEX_B + 0x48 * ((k + 1) & 15)), 0);
+    SetAlpha(sqrtf(frac));
+    DrawVisibleMeshes(actor, 0);
+
+    float t0 = 1.0f - 2.0f * (acc - g_ferrilFlashAt);
+    if (t0 > 0.0f) {
+        SetAlpha(1.0f - 2.0f * fabsf(t0 - 0.5f));
+        *(DWORD*)G_RENDER_DIRTY = 1;
+        for (int i = 0; i < n; ++i) SetPartVisible(ctrl, 0, i, 0);
+        for (int i = TAT_C_BEGIN; i < TAT_COUNT; ++i)
+            SetPartVisible(ctrl, 0, g_tattooHandles[i], 1);
+        BindTexture((const void*)FERRIL_TEX_C, 0);
+        DrawVisibleMeshes(actor, 0);
+    }
+    SetAlpha(1.0f);
+    for (int i = 0; i < n; ++i) SetPartVisible(ctrl, 0, i, snapshot[i]);
+    SetRenderFlags(0xC0);
+    *(DWORD*)G_RENDER_DIRTY = 0;
+    EndActorTransform();
+    if (g_ferrilFirstPass) {
+        g_ferrilFirstPass = false;
+        Trace("FERRIL tattoo passes running model=%08lX parts=%d", (DWORD)model, n);
+    }
+}
+
+// CMainCharacter vtable 0x7034E4: render = slot 6 (0x7034FC) -> 0x0054AED0,
+// onDamage = slot 15 (0x703520) -> 0x00551160.
+typedef int  (__fastcall *RenderFn_t)(void*, void*);
+typedef void (__fastcall *DamageFn_t)(void*, void*, void*);
+static RenderFn_t g_origRender = (RenderFn_t)0x0054AED0;
+static DamageFn_t g_origDamage = (DamageFn_t)0x00551160;
+
+static int __fastcall HookFerrilRender(void* self, void*) {
+    void* actor = *(void**)G_PLAYER_OBJ;
+    const ModOutfit* outfit = FindModOutfit(g_skinId);
+    if (self != actor || !g_ferrilTattoo || !outfit || outfit->id != 0x4252E023)
+        return g_origRender(self, 0);
+    void* ctrl = (char*)actor + 0x158;
+    if (!FerrilTattooResolve(ctrl)) return g_origRender(self, 0);
+    int n = PartCount(ctrl, 0);
+    // Hide all tattoo parts before the normal draw, like the native does.
+    for (int i = 0; i < TAT_COUNT; ++i)
+        SetPartVisible(ctrl, 0, g_tattooHandles[i], 0);
+    int r = g_origRender(self, 0);
+    void* mgr = *(void**)G_RENDER_MGR;
+    __try {
+        if (!g_ferrilTattooDead && mgr && !IsSpecialPass(mgr, 0) &&
+            !*(DWORD*)G_RENDER_TO_TEX && MgrIsVisible(mgr, 0, (char*)actor + 0x98))
+            FerrilTattooPasses(actor, ctrl, n, *(float*)G_GAME_CLOCK);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_ferrilTattooDead = true;
+        Trace("FERRIL tattoo pass faulted; feature disabled");
+        __try {                             // never leave layers visible
+            for (int i = 0; i < TAT_COUNT; ++i)
+                SetPartVisible(ctrl, 0, g_tattooHandles[i], 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return r;
+}
+
+static void __fastcall HookFerrilDamage(void* self, void*, void* ev) {
+    float before = *(float*)((char*)self + 0x39C8);
+    g_origDamage(self, 0, ev);
+    float after = *(float*)((char*)self + 0x39C8);
+    if (self == *(void**)G_PLAYER_OBJ && after < before)
+        g_ferrilFlashAt = *(float*)G_GAME_CLOCK;
+}
+
+static void PatchVtableSlot(DWORD slot, DWORD expected, DWORD target, const char* name) {
+    DWORD* entry = (DWORD*)slot;
+    if (*entry != expected) {
+        Trace("VTABLE %s skipped %08lX holds %08lX expected %08lX",
+              name, slot, *entry, expected);
+        return;
+    }
+    DWORD old;
+    if (!VirtualProtect(entry, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        Trace("VTABLE %s failed %08lX error=%lu", name, slot, GetLastError());
+        return;
+    }
+    *entry = target;
+    VirtualProtect(entry, 4, old, &old);
+    Trace("VTABLE %s %08lX -> %08lX", name, slot, target);
+}
+
+static void InstallFerrilTattoo() {
+    PatchVtableSlot(0x7034FC, 0x0054AED0, (DWORD)HookFerrilRender, "render");
+    PatchVtableSlot(0x703520, 0x00551160, (DWORD)HookFerrilDamage, "onDamage");
+}
+
 // ------------------------- patch machinery ---------------------------------
 static void PatchSite(void* site, int siteLen, void* target) {
     DWORD old;
@@ -2133,6 +2379,8 @@ static void LoadConfig() {
             g_effects &= ~(1L << effect);
     GetPrivateProfileStringA("Appearance", "skin", "default",
                              g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
+    g_ferrilTattoo = GetPrivateProfileIntA("Appearance", "ferrilTattoo", 1,
+                                           ".\\br2mod.ini");
     {   // remembered challenge options
         int n = GetPrivateProfileIntA("Challenge", "count", 25,
                                       ".\\br2mod.ini");
@@ -2254,6 +2502,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchCallChecked(0x549C3E,"\xE8\x6D\xCD\xFA\xFF",5,GetPlayerOutfitModel);
     PatchCallChecked(0x54A25D,"\xE8\x4E\xC7\xFA\xFF",5,GetPlayerOutfitModel);
     PatchCallChecked(0x54A3CA,"\xE8\xF1\xC5\xFA\xFF",5,GetPlayerOutfitPhysics);
+    InstallFerrilTattoo();
     // These were diagnostic workarounds for the wrong-this corruption now
     // fixed in HookA. VirtualQuery on every stricmp dominated character load.
     // Leave the native CRT/cache lookup and native chain path intact by default.
