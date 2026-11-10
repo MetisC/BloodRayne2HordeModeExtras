@@ -36,6 +36,10 @@ PUNK_VARIANTS = (
     ("b", "a", "b", "b", "a"),
     ("c", "c", "shirt_a_03", "pants_a", "shirt_b"),
     ("b", "a", "shirt_b_02", "pants_b", "shirt_a"),
+    ("a", "b", "shirt_a_01", "pants_a", "shirt_a"),
+    ("c", "a", "shirt_b_04", "pants_b", "shirt_b"),
+    ("a", "c", "a", "b", "a"),
+    ("b", "b", "b", "a", "b"),
 )
 # Head, dress, hair, mask, feather, earrings, necklace.
 BALLROOM_VARIANTS = (
@@ -45,6 +49,10 @@ BALLROOM_VARIANTS = (
     ("b", "d", "a", "e", "b", "a", False),
     ("a", "e", "c", "f", "a", "b", False),
     ("b", "f", "c", "h", "b", "a", True),
+    ("b", "a", "b", "g", "a", "a", True),
+    ("a", "c", "a", "i", "b", "b", False),
+    ("b", "e", "b", "b", "a", "a", True),
+    ("a", "f", "a", "b", "b", "b", False),
 )
 # Hair, face, torso, upper arm, forearm, waist, thigh, shin, boot, skirt, laces.
 ZERENSKI_VARIANTS = (
@@ -54,6 +62,10 @@ ZERENSKI_VARIANTS = (
     ("d", "a", "h", "c", "c", "a", "a", "d", "d", "d", False),
     ("e", "b", "j", "e", "e", "b", "c", "d", "d", "a", False),
     ("b", "c", "l", "b", "a", "b", "b", "b", "b", "d", False),
+    ("a", "b", "b", "c", "a", "a", "b", "a", "b", "a", True),
+    ("d", "c", "e", "b", "c", "b", "a", "b", "d", "b", True),
+    ("c", "a", "f", "d", "e", "a", "c", "a", "b", "c", False),
+    ("e", "b", "i", "e", "d", "b", "b", "c", "d", "d", True),
 )
 
 
