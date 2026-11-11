@@ -27,8 +27,10 @@ import os
 import re
 import struct
 
-COUNTS = (15, 25, 50, 100)
-DESIRED = (3, 4, 6, 8)   # concurrent-enemy ladder per count tier
+COUNTS = (15, 25, 50, 100, 250)
+DESIRED = (3, 4, 6, 8, 8)   # concurrent-enemy ladder per count tier
+CAMPAIGN_DESIRED = (2, 2, 3, 3, 3)
+ARENA_FINISH_FLAG = 'WaveDoneItArena'
 
 
 def build_scb(tokens):
@@ -36,22 +38,28 @@ def build_scb(tokens):
     return struct.pack("<3I", 1, len(tokens), len(body)) + body
 
 
-def wave_script(wp, setup, arm, killflag, music, weapons=()):
+def wave_script(wp, setup, arm, killflag, music, weapons=(), event_flags=(),
+                guns=False):
     t = [
         "setLevelDescription(MissionDescription)",
         "flagOff(tutorials)",
         "setMusic()",
         "flagOff(%s)" % killflag,
         "fade(255,0,0,0,0)",
-        "warpTo($,%s)" % wp,
     ]
+    if guns:
+        t.append("enableGunMode(single)")
+    t.append("warpTo($,%s)" % wp)
     # Rayne's blades/bloodguns are standalone actors (carriedByActor=(none)):
     # they auto-equip on proximity, so warping only the hero would leave them
     # at the story spawn -- warp every hero weapon alongside, like story does
     t += ["warpTo(%s,%s)" % (w, wp) for w in weapons]
     t += setup
-    # createActor instantiates the object, activateTrigger arms it -- the
-    # native battle script (A1_MANSION_PART1_BATTLE) runs exactly this pair
+    if killflag == ARENA_FINISH_FLAG:
+        # Let the warp and proximity pickup settle before starting the wave.
+        t += ['idle', 'flagOff(%s)' % killflag]
+    # Campaign arenas can explicitly arm a CSpawnTrigger after creation.
+    # Mansion Battle preserves the native activation on volume entry.
     t += arm
     if music:
         t.append("SetMusic(%s)" % music)
@@ -59,6 +67,10 @@ def wave_script(wp, setup, arm, killflag, music, weapons=()):
         "fade(0,0,0,0,1)",
         ":mainloop",
         "idle",
+    ]
+    for flag, handler in event_flags:
+        t.extend(("if (%s)" % flag, "gosub %s" % handler))
+    t += [
         "if (%s)" % killflag,
         "{",
         "idle",
@@ -77,6 +89,76 @@ def wave_script(wp, setup, arm, killflag, music, weapons=()):
 
 TRIG_BLK = re.compile(r'(\{ CSpawnTrigger "([^"]+)".*?)(\} CSpawnTrigger)',
                       re.S)
+STORY_TRIGGER_BLK = re.compile(r'(\{ CTrigger "([^"]+)".*?)(\} CTrigger)',
+                              re.S)
+
+
+DOOR_BLOCK = re.compile(r'^\{ (CDoor|CSmartDoor|CVampireDoor) "[^"]+".*?^\} \1',
+                        re.M | re.S)
+
+
+def close_arena_doors(level):
+    """Keep the door model active and remove its opening routes."""
+    def close(match):
+        block = match.group()
+        kind = match.group(1)
+        if kind == "CDoor":
+            fields = {"doorState": "0", "param": "0", "autoOpen": "0",
+                      "allowedSides": "0", "openEvent": '""',
+                      "closeEvent": '""', "unlockAfterOpening": "0"}
+        elif kind == "CSmartDoor":
+            fields = {"closed": "1", "openEvent": '""', "closedEvent": '""',
+                      "actorTriggerTypes": '"CWayPoint"'}
+        else:
+            # This class carries a trigger. Preserve the visible door but
+            # remove its story actions, including warps.
+            fields = dict.fromkeys(("actorEnterEvent", "actorLeaveEvent",
+                                    "actorInsideEvent", "onEvent"), '""')
+        for key, value in fields.items():
+            block, count = re.subn(
+                r'^(\t)[^\r\n]+?(\s+// ' + key + r')(\r?)$',
+                lambda m: m.group(1) + value + m.group(2) + m.group(3), block, flags=re.M)
+            assert count == 1, (kind, key)
+        return block
+    return DOOR_BLOCK.sub(close, level)
+
+
+def add_perimeter(level, bounds, classes="CMainCharacter"):
+    left, right, floor, near, far = bounds
+    x = (left + right) / 2
+    z = (near + far) / 2
+    sides = [(left, z, 2, far - near + 4), (right, z, 2, far - near + 4),
+             (x, near, right - left + 4, 2), (x, far, right - left + 4, 2)]
+    version = re.search(r'^CBarrier[ \t]+(\d+)[ \t]*\r?$', level, re.M)
+    assert version and int(version[1]) in (3, 4), 'unsupported CBarrier version'
+    # The engine treats Y as the base of CBarrier. Extend below the arena
+    # floor to cover ledges and lower landings, and above it to catch jumps.
+    base_y = floor - 64
+    level, count = re.subn(r'(// actor count\r?\n)(\d+)',
+                           lambda m: m[1] + str(int(m[2]) + len(sides)),
+                           level, count=1)
+    assert count == 1
+    newline = "\r\n" if "\r\n" in level else "\n"
+    declarations, blocks = [], []
+    for i, (bx, bz, sx, sz) in enumerate(sides):
+        name = "ArenaBoundary%d" % i
+        declarations.append('CBarrier "%s"' % name)
+        blocks.extend((
+            '{ CBarrier "%s"' % name,
+            '\t%g,%g,%g    // pos' % (bx, base_y, bz),
+            '\t0,0,0    // orient',
+            '\t1    // enabled',
+            '\t""    // group',
+            '\t0    // attachCount',
+            '\t%g,192,%g    // size' % (sx, sz),
+            '\t"%s"    // effectClassNameList' % classes,
+        ))
+        if int(version[1]) >= 4:
+            blocks.append('\t0    // pushCamera')
+        blocks.append('} CBarrier "%s"' % name)
+    level = level.replace("// actor data list",
+                          newline.join(declarations + ["// actor data list"]), 1)
+    return level.replace("// hero name", newline.join(blocks + ["// hero name"]), 1)
 
 
 def trig_fields(block):
@@ -97,9 +179,99 @@ def actor_pos(text, cls, name):
     return [float(x) for x in m.group(1).split(',')] if m else None
 
 
+def prepare_arena_player(level):
+    """Place the unowned player blades at the hero and return their names."""
+    hero = re.search(r'// hero name\r?\n"([^"]+)"', level)[1]
+    position = actor_pos(level, 'CMainCharacter', hero)
+    blades = []
+    for name, block in re.findall(r'^\{ CAnimatedMeleeWeapon "([^"]+)"(.*?)^\} CAnimatedMeleeWeapon',
+                                  level, re.M | re.S):
+        if (re.search(r'^\t"\(none\)"[ \t]+// carriedByActor', block, re.M) and
+                re.search(r'^\t"weapons_rayne_blade_01\.smf"[ \t]+// modelName', block, re.M | re.I)):
+            blades.append(name)
+    assert len(blades) == 2, (hero, blades)
+    for name in blades:
+        level = actor_field(level, 'CAnimatedMeleeWeapon', name, 'pos', '%g,%g,%g' % tuple(position))
+    return level, blades
+
+
+def strip_arena_cinematics(level):
+    # In LVL files the cinemat list is the final section. The mission loader
+    # resolves its dialogue tags during reset even if the SCB never plays it.
+    level, count = re.subn(r'(// cinemat count\r?\n)\d+[\s\S]*\Z',
+                           lambda m: m[1] + '0' + ('\r\n' if '\r\n' in m[1] else '\n'), level)
+    assert count == 1, 'missing cinematic section'
+    return level
+
+
+def actor_field(level, cls, name, field, value):
+    pattern = (r'(^\{ ' + re.escape(cls) + r' "' + re.escape(name) +
+               r'"[^}]*?^\t)[^\r\n]+?([ \t]+// ' + re.escape(field) + r'\r?$)')
+    level, count = re.subn(pattern, lambda m: m[1] + value + m[2], level, flags=re.M)
+    assert count == 1, (cls, name, field)
+    return level
+
+
+def cover_arena_wave(level, name, bounds):
+    """Keep the type-4 wave active anywhere inside the player perimeter."""
+    trigger = next(m[0] for m in TRIG_BLK.finditer(level) if m[2] == name)
+    pos, size, radius, _ = trig_fields(trigger)
+    x, y, z = map(float, pos.split(','))
+    width, height, depth = map(float, size.split(','))
+    orient = re.search(r'^\t([^\r\n]+?)\s+// orient', trigger, re.M)[1]
+    pitch, roll, yaw = map(float, orient.split(','))
+    assert pitch == roll == 0, (name, orient)
+    x0, x1, floor, z0, z1 = bounds
+    corners = [(px - x, pz - z) for px in (x0, x1) for pz in (z0, z1)]
+    cs, sn = math.cos(yaw), math.sin(yaw)
+    # Include the inner edge of the walls and a small movement margin.
+    extent_x = max(abs(dx * cs + sign * dz * sn) for dx, dz in corners for sign in (-1, 1))
+    extent_z = max(abs(dz * cs + sign * dx * sn) for dx, dz in corners for sign in (-1, 1))
+    needed = (math.ceil(2 * (extent_x + 1)), math.ceil(2 * (extent_z + 1)))
+    # The native test uses a 3D volume and radius. Preserve the stock
+    # trigger height while allowing for the actor origin above the floor.
+    dy = abs(floor - y) + 20
+    if width < needed[0] or depth < needed[1] or height < 2 * dy:
+        level = actor_field(level, 'CSpawnTrigger', name, 'triggerSize',
+                            '%g,%g,%g' % (max(width, needed[0]), max(height, 2 * dy),
+                                          max(depth, needed[1])))
+    needed_radius = math.ceil(max(math.sqrt(dx*dx + dy*dy + dz*dz) for dx, dz in corners) + 1)
+    if int(radius) < needed_radius:
+        level = actor_field(level, 'CSpawnTrigger', name, 'testRadius', str(needed_radius))
+    return level
+
+
+def add_fall_recovery(level, template, bounds, depth, height):
+    """Place a player-only recovery trigger below the walkable arena."""
+    assert re.search(r'^CTrigger[ \t]+32[ \t]*\r?$', level, re.M)
+    name = 'ArenaFallRecovery'
+    source = 'TriggerSombodyFell'
+    block = re.search(r'^\{ CTrigger "' + source + r'".*?^\} CTrigger "' + source +
+                      r'"', template, re.M | re.S)[0].replace(source, name)
+    x0, x1, floor, z0, z1 = bounds
+    fields = {
+        'pos': '%g,%g,%g' % ((x0 + x1) / 2, floor - depth, (z0 + z1) / 2),
+        'orient': '0,0,0', 'enabled': '1',
+        'Trigger size': '%g,%g,%g' % (x1 - x0 + 64, height, z1 - z0 + 64),
+        'Allowed actor classes': '"CMainCharacter"', 'Allow dead actors': '0',
+        'actorEnterEvent': '"flagOn(ArenaPlayerFell);"',
+    }
+    for key, value in fields.items():
+        block = actor_field(block, 'CTrigger', name, key, value)
+    newline = '\r\n' if '\r\n' in level else '\n'
+    block = newline.join(block.splitlines())
+    level, count = re.subn(r'(// actor count\r?\n)(\d+)',
+                           lambda m: m[1] + str(int(m[2]) + 1), level, count=1)
+    assert count == 1
+    level = level.replace('// actor data list', 'CTrigger "' + name + '"' + newline +
+                          '// actor data list', 1)
+    return level.replace('// hero name', block + newline + '// hero name', 1)
+
+
 def make_lvl(src_text, lvl_base, scb_base, trigger, count, desired, killflag,
              inject_blk=None, inject_name=None, wp=None, keep_emitters=None,
-             ring_r=None):
+             ring_r=None, arena_cleanup=False, keep_triggers=(),
+             spawn_rule=3, spawn_delay=0, keep_trigger_position=False, must_face=0):
     d = src_text
     # point the script dependency at the shared generated scb
     d, n = re.subn(r"world\\[A-Za-z0-9_]+\.script",
@@ -126,7 +298,7 @@ def make_lvl(src_text, lvl_base, scb_base, trigger, count, desired, killflag,
                      '\n\t%s\\1' % size, blk, count=1)
         blk = re.sub(r'\n\t\d+(\s*// testRadius)', '\n\t%s\\1' % rad,
                      blk, count=1)
-        blk, n1 = re.subn(r'^\t\d+(\s*// maxNumberSpawn)',
+        blk, n1 = re.subn(r'^\t-?\d+(\s*// maxNumberSpawn)',
                           '\t%d\\1' % count, blk, count=1, flags=re.M)
         blk, n2 = re.subn(
             r'^\t\d+(\s*// desiredNumberOfActiveEnemiesInArea)',
@@ -161,28 +333,28 @@ def make_lvl(src_text, lvl_base, scb_base, trigger, count, desired, killflag,
         m = pat.search(d)
         assert m, "trigger %s not found in %s" % (trigger, lvl_base)
         blk = m.group(1)
-        blk, n1 = re.subn(r'^\t\d+(\s*// maxNumberSpawn)',
+        blk, n1 = re.subn(r'^\t-?\d+(\s*// maxNumberSpawn)',
                           '\t%d\\1' % count, blk, count=1, flags=re.M)
         blk, n2 = re.subn(
             r'^\t\d+(\s*// desiredNumberOfActiveEnemiesInArea)',
             '\t%d\\1' % desired, blk, count=1, flags=re.M)
         blk, n3 = re.subn(r'\t"[^"]*"(\s*// enemiesDead)',
                           '\t"flagon(%s);"\\1' % killflag, blk, count=1)
-        blk, n4 = re.subn(r'^\t\d+(\s*// maxDelayTimer)',
-                          '\t0\\1', blk, count=1, flags=re.M)
+        blk, n4 = re.subn(r'^\t[^\r\n]+?([ \t]+// maxDelayTimer)',
+                          lambda m: '\t%g%s' % (spawn_delay, m[1]), blk, count=1, flags=re.M)
         # mustFace gates emission on the player looking at the trigger center
         # (story uses it to time cinematic reveals); an arena should start
         # emitting the instant the player is inside
         blk = re.sub(r'^\t\d+(\s*// mustFace)\r?$',
-                     '\t0\\1', blk, count=1, flags=re.M)
-        # rule 3: the horde-refill rule -- the stock SPAWN_* test arenas
-        # (desired 3-7, max 250) all run type 4 + rule 3 for dense waves.
-        # rule 2 rejects emitters seen in the current/previous frame, which
-        # stalls the wave in open rooms where every point is visible
+                     lambda m: '\t%d%s' % (must_face, m[1]), blk, count=1, flags=re.M)
+        if arena_cleanup:
+            blk = re.sub(r'^\t"[^"]*"([ \t]+// waveDone)',
+                         r'\t""\1', blk, count=1, flags=re.M)
+        # Rule 0 allows visible emitters. Rule 2 rejects recently visible
+        # points, and rule 3 also applies the engine's visibility test.
         blk = re.sub(r'^\t\d+(\s*// spawnEmitterActivationRule)',
-                     '\t3\\1', blk, count=1, flags=re.M)
-        assert n1 == 1 and n3 == 1, \
-            "trigger fields not matched in %s (%d %d %d)" % (lvl_base, n1, n2, n3)
+                     lambda m: '\t%d%s' % (spawn_rule, m[1]), blk, count=1, flags=re.M)
+        assert n1 == n2 == n3 == n4 == 1, (lvl_base, n1, n2, n3, n4)
         if keep_emitters:
             # huge rooms scatter the wave over every emitter and mooks get
             # lost across the floor -- keep only the N nearest to the warp
@@ -196,11 +368,18 @@ def make_lvl(src_text, lvl_base, scb_base, trigger, count, desired, killflag,
                 return sum((p[i] - wp_pos[i]) ** 2 for i in range(3)) if p \
                     else 1e30
             em.sort(key=dist)
+            assert 0 < keep_emitters <= len(em), (trigger, keep_emitters, em)
             kept = em[:keep_emitters]
             slots = kept + ["(none)"] * (10 - keep_emitters)
             it = iter(slots)
             blk = re.sub(r'\t"[^"]*"(\s*// text)',
                          lambda m: '\t"%s"%s' % (next(it), m.group(1)), blk)
+            # Centre the activation volume on Rayne. A stock wave may have
+            # been placed for a story approach that starts tens of metres away.
+            if wp_pos and not keep_trigger_position:
+                ptxt = "%g,%g,%g" % tuple(wp_pos)
+                blk = re.sub(r'^(\t)[^\r\n]+?(\s*// pos)',
+                             r'\g<1>%s\2' % ptxt, blk, count=1, flags=re.M)
         else:
             kept = wp_pos = None
         d = d[:m.start(1)] + blk + d[m.end(1):]
@@ -250,11 +429,35 @@ def make_lvl(src_text, lvl_base, scb_base, trigger, count, desired, killflag,
                         if e != "(none)")
     def neuter_spawn(mm):
         if mm.group(1) in owned:
+            if arena_cleanup:
+                return re.sub(r'^(\t)"[^"]*"([ \t]+// (?:eventToRaiseOnSpawn|rallyPointName))',
+                              r'\g<1>""\g<2>', mm.group(0), flags=re.M)
             return mm.group(0)
         return re.sub(r'^(\t)1(\s*// enabled)', r'\g<1>0\g<2>',
                       mm.group(0), count=1, flags=re.M)
     d = re.sub(r'\{ CSpawn "([^"]+)".*?\} CSpawn "[^"]*"',
                neuter_spawn, d, flags=re.S)
+    if arena_cleanup:
+        d = close_arena_doors(d)
+        def disable_trigger(mm):
+            if mm.group(2) in keep_triggers:
+                return mm.group(0)
+            head = re.sub(r'^(\t)1(\s*// enabled)', r'\g<1>0\g<2>',
+                          mm.group(1), count=1, flags=re.M)
+            return head + mm.group(3)
+        d = STORY_TRIGGER_BLK.sub(disable_trigger, d)
+        # Static enemies are not part of the counted wave. Leave CSpawn
+        # emitters untouched; only them may populate this arena.
+        hostile = re.compile(
+            r'\{ (C(?:[A-Za-z0-9_]*(?:Punk|Dhampir|Brute|Kestral|'
+            r'Slegion|Roach|Golem|Zombie|Ninja|Guard|Soldier|Cop|'
+            r'Zerenski|Kagen|Kagan|Xerx|Foreman|UnRaveler|'
+            r'SuicideBomber|Slezz|Ferril|BossBat|BatSwarm)[A-Za-z0-9_]*)) '
+            r'"([^"]+)"(.*?)\} \1 "[^"]*"', re.S)
+        def disable_hostile(mm):
+            return re.sub(r'^(\t)1(\s*// enabled)', r'\g<1>0\g<2>',
+                          mm.group(0), count=1, flags=re.M)
+        d = hostile.sub(disable_hostile, d)
     return d
 
 
@@ -279,6 +482,13 @@ def main():
     ap.add_argument("--ring", type=float, default=None,
                     help="re-place the kept emitters on a ring of this "
                     "radius around --wp")
+    ap.add_argument("--arena-cleanup", action="store_true",
+                    help="disable story triggers and static enemies while "
+                    "preserving closed, solid door actors")
+    ap.add_argument("--keep-trigger", action="append", default=[],
+                    help="leave this CTrigger active for an environmental hazard")
+    ap.add_argument("--guns", action="store_true",
+                    help="enable the game's bloodgun mode in this arena")
     a = ap.parse_args()
 
     inject_blk = inject_name = None
@@ -315,18 +525,29 @@ def main():
     # hero gear lives in the level as standalone weapon actors
     weapons = re.findall(r'\{ (?:CAnimatedMeleeWeapon|CMultigun) "([^"]+)"',
                          text)
+    event_flags = []
+    extra = []
+    if stem.upper() == "A2_MEATPACKING_1":
+        # Native fan impact/death effects, without its six-enemy break,
+        # fan deletion, exit sequence, or story cinematic.
+        event_flags = [("Fan_Fed_With_Body", "ArenaFanKill")]
+        extra = [":ArenaFanKill", "raise(Fx_Fan_Activate)",
+                 "raise(Fx_Fan_Activate2)", "raise(Snd_Fan_Kill1)",
+                 "setTimeFactor(0.35)", "wait(.08)", "setTimeFactor(1)",
+                 "return"]
     scb = build_scb(wave_script(a.wp, a.setup, arm, a.killflag, a.music,
-                                weapons))
+                                weapons, event_flags, a.guns) + extra)
     out_scb = os.path.join(a.dst, a.name + ".scb")
     open(out_scb, "wb").write(scb)
     print("scb    ->", os.path.basename(out_scb))
 
-    suffix = {15: "e", 25: "n", 50: "h", 100: "x"}
+    suffix = {15: "e", 25: "n", 50: "h", 100: "x", 250: "250"}
     for count, desired in zip(COUNTS, DESIRED):
         out_name = "%s_%s.lvl" % (a.name, suffix[count])
         lvl = make_lvl(text, lvl_base, a.name, a.trigger, count, desired,
                        a.killflag, inject_blk, inject_name, a.wp,
-                       a.keep_emitters, a.ring)
+                       a.keep_emitters, a.ring, a.arena_cleanup,
+                       tuple(a.keep_trigger))
         out = os.path.join(a.dst, out_name)
         open(out, "wb").write(lvl.encode("cp1252"))
         print("lvl    ->", out_name, "(%d enemies, %d active)" %

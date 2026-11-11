@@ -151,6 +151,27 @@
     X(int, styleFlashMs, 230, 0, 1500) \
     X(float, styleX, 0.95f, 0.15f, 0.99f) \
     X(float, styleY, 0.46f, 0.10f, 0.90f) \
+    X(int, bloodShotAmmoPoolL1, 270, 1, 1000) \
+    X(int, bloodShotAmmoPoolL2, 300, 1, 1000) \
+    X(int, bloodShotAmmoPoolL3, 330, 1, 1000) \
+    X(int, bloodStreamAmmoPoolL1, 135, 1, 1000) \
+    X(int, bloodStreamAmmoPoolL2, 180, 1, 1000) \
+    X(int, bloodStreamAmmoPoolL3, 225, 1, 1000) \
+    X(int, bloodSprayAmmoPoolL1, 45, 1, 1000) \
+    X(int, bloodSprayAmmoPoolL2, 53, 1, 1000) \
+    X(int, bloodSprayAmmoPoolL3, 60, 1, 1000) \
+    X(int, bloodBombAmmoPoolL1, 30, 1, 1000) \
+    X(int, bloodBombAmmoPoolL2, 38, 1, 1000) \
+    X(int, bloodBombAmmoPoolL3, 45, 1, 1000) \
+    X(int, bloodFlameAmmoPoolL1, 23, 1, 1000) \
+    X(int, bloodFlameAmmoPoolL2, 27, 1, 1000) \
+    X(int, bloodFlameAmmoPoolL3, 33, 1, 1000) \
+    X(int, bloodHammerAmmoPoolL1, 18, 1, 1000) \
+    X(int, bloodHammerAmmoPoolL2, 21, 1, 1000) \
+    X(int, bloodHammerAmmoPoolL3, 24, 1, 1000) \
+    X(float, conventionalPickupRadius, 5.f, 1.f, 10.f) \
+    X(int, conventionalLowAmmo, 3, 0, 30) \
+    X(float, conventionalDiscardSeconds, 5.f, 1.f, 30.f) \
     COMBAT_TRACE_SETTING(X)
 
 #ifdef BR2_COMBAT_TEST
@@ -167,11 +188,12 @@ struct EnhancedSettings {
 
 SRWLOCK g_enhancedLock = SRWLOCK_INIT;
 EnhancedSettings g_pendingEnhanced, g_enhanced;
-unsigned long long g_pendingCombatProfile, g_combatProfile;
+unsigned long long g_pendingCombatProfiles[2], g_combatProfile;
 
-unsigned long long CombatProfile(const EnhancedSettings& settings) {
+unsigned long long CombatProfile(const EnhancedSettings& settings, bool enhancedGuns) {
     // Version the rules and hash effective values, independent of INI formatting.
     unsigned long long hash = 14695981039346656037ull ^ 10ull;
+    if (enhancedGuns) hash = (hash ^ 9u) * 1099511628211ull;
     EnhancedSettings rules = settings;
     // Framing is visual only. Keep its original v4 hash contribution so
     // records already saved with the default framing are still visible.
@@ -181,7 +203,10 @@ unsigned long long CombatProfile(const EnhancedSettings& settings) {
     if (strcmp(#key, "trace") != 0 && strcmp(#key, "styleRankSS") != 0 && \
         strcmp(#key, "styleRankSSS") != 0 && strcmp(#key, "styleRankV") != 0 && \
         strcmp(#key, "ephemeraHitstopScale") != 0 && strcmp(#key, "parryGuardMs") != 0 && \
-        strncmp(#key, "feedEscape", 10) != 0) { \
+        strcmp(#key, "conventionalLowAmmo") != 0 && \
+        strncmp(#key, "feedEscape", 10) != 0 && \
+        (enhancedGuns || (strstr(#key, "AmmoPool") == nullptr && \
+                         strncmp(#key, "conventional", 12) != 0))) { \
         const type field = rules.key == 0 ? type(0) : rules.key; \
         DWORD bits; \
         memcpy(&bits, &field, sizeof bits); \
@@ -249,7 +274,8 @@ void ReadEnhancedSettings() {
     settings.styleRankV = max(settings.styleRankV, settings.styleRankSSS + 1);
     AcquireSRWLockExclusive(&g_enhancedLock);
     g_pendingEnhanced = settings;
-    g_pendingCombatProfile = CombatProfile(settings);
+    g_pendingCombatProfiles[0] = CombatProfile(settings, false);
+    g_pendingCombatProfiles[1] = CombatProfile(settings, true);
     ReleaseSRWLockExclusive(&g_enhancedLock);
     g_enhancedWriteTime = file.ftLastWriteTime;
     g_enhancedFileSize = file.nFileSizeLow;
@@ -261,10 +287,12 @@ void ReadEnhancedSettings() {
 
 void SampleEnhancedSettings() {
     if (TryAcquireSRWLockShared(&g_enhancedLock)) {
+        const bool enhancedGuns = g_combat == CombatEnhanced &&
+                                  CombatEffectEnabled(EffectGunCombat);
         g_enhanced = g_pendingEnhanced;
-        g_combatProfile = g_pendingCombatProfile;
+        g_combatProfile = g_pendingCombatProfiles[enhancedGuns];
         ReleaseSRWLockShared(&g_enhancedLock);
-        if (!g_combatProfile) g_combatProfile = CombatProfile(g_enhanced);
+        if (!g_combatProfile) g_combatProfile = CombatProfile(g_enhanced, enhancedGuns);
         if (g_runBars >= 0 && !g_runDone && g_runCombat == CombatEnhanced &&
             g_runCombatProfile != g_combatProfile)
             g_runCombatChanged = true;

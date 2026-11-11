@@ -6,7 +6,10 @@ struct FeedEscape {
     BYTE* rayne;
     BYTE* enemy;
     const DWORD* vtable;
+    int enemyMotion;
+    bool stockPairing;
     float fps, first, end;
+    bool bladeFollowUp;
     bool attempted, armed, rolled;
     float travelX, travelZ, travelMs, travelAge;
 #ifdef BR2_COMBAT_TEST
@@ -49,16 +52,17 @@ ParryVec* __cdecl HookFeedEscapeRootAngles(ParryVec* angles, const void* rootRot
 bool FeedEscapeEnemyFrame(float& frame) {
     const auto& escape = g_feedEscape;
     const DWORD* vtable;
-    const BYTE* pairedRayne;
+    const BYTE* pairedRayne = nullptr;
     struct { int state; float frame; } animation;
     // Rayne's knock-off animation event 0x644 clears the pairing through
     // 0x67375E before the enemy's weapon becomes active. Keep the actor captured
     // at the native repel call while its follow-up animation is still active.
     if (!SafeRead(escape.enemy, &vtable, sizeof vtable) || vtable != escape.vtable ||
-        !SafeRead(escape.enemy + 0x3A44, &pairedRayne, sizeof pairedRayne) ||
+        (escape.stockPairing &&
+         !SafeRead(escape.enemy + 0x3A44, &pairedRayne, sizeof pairedRayne)) ||
         (pairedRayne && pairedRayne != escape.rayne) ||
         !SafeRead(escape.enemy + 0x17C, &animation, sizeof animation) ||
-        animation.state != FeedRepelAttack)
+        animation.state != escape.enemyMotion)
         return false;
     frame = animation.frame;
     return true;
@@ -73,14 +77,19 @@ void __cdecl CaptureFeedEscape(BYTE* enemy, BYTE* rayne, int accepted) {
     if (!FeedEscapeEnabled() || accepted != 1) return;
 
     const DWORD* vtable = *(const DWORD**)enemy;
-    if (vtable[0x1B4 / 4] != 0x5BC520 || *(int*)(enemy + 0x17C) != FeedRepelAttack ||
-        *(BYTE**)(enemy + 0x3A44) != rayne) return;
+    const bool stockPairing = vtable[0x1B4 / 4] == 0x5BC520;
+    if (stockPairing && *(BYTE**)(enemy + 0x3A44) != rayne) return;
 
     BYTE* skeleton = *(BYTE**)(enemy + 0x178);
-    if (!skeleton || *(int*)(skeleton + 0x2418) <= FeedRepelAttack) return;
+    if (!skeleton) return;
+    const auto findMotion = (int (__thiscall*)(BYTE*, const char*, int))0x605200;
+    const int motion = stockPairing && *(int*)(enemy + 0x17C) == FeedRepelAttack
+        ? FeedRepelAttack : findMotion(skeleton, "feedrepel", 0);
+    if (motion < 0 || motion >= *(int*)(skeleton + 0x2418) ||
+        *(int*)(enemy + 0x17C) != motion) return;
     const BYTE* clips = *(const BYTE**)(skeleton + 0x241C);
     if (!clips) return;
-    const BYTE* clip = clips + FeedRepelAttack * 0xA4;
+    const BYTE* clip = clips + motion * 0xA4;
     const float fps = *(const float*)(clip + 0x6C);
     const unsigned count = *(const unsigned*)(clip + 0x98);
     struct Range { int name; float first, end; };
@@ -99,9 +108,10 @@ void __cdecl CaptureFeedEscape(BYTE* enemy, BYTE* rayne, int accepted) {
             followUp = &range;
     }
     if (!followUp) return;
-    g_feedEscape = {rayne, enemy, vtable, fps, followUp->first, followUp->end};
+    g_feedEscape = {rayne, enemy, vtable, motion, stockPairing, fps,
+                    followUp->first, followUp->end, followUp->name == blade};
     g_parryArmed = false;
-    LogParry("feed-escape-start", 0, 0, 0, FeedRepelAttack, (DWORD)vtable,
+    LogParry("feed-escape-start", 0, 0, 0, motion, (DWORD)vtable,
              0, enemy, rayne, 0, followUp->first, followUp->end, fps);
 }
 
@@ -131,9 +141,12 @@ void StartFeedEscapeRoll(BYTE* rayne, int state, float frame) {
 
     // End the pairing with the stock enemy release and player cleanup. The
     // attacker keeps its current animation, so its follow-up can swing past Rayne.
-    const BYTE* pairedRayne = *(BYTE**)(escape.enemy + 0x3A44);
-    if (pairedRayne == rayne)
+    // The native knock-off event uses the same character cast and release,
+    // including for enemies with a different feedrepel handler.
+    if ((escape.stockPairing && *(BYTE**)(escape.enemy + 0x3A44) == rayne) ||
+        (!escape.stockPairing && attached)) {
         ((void (__thiscall*)(BYTE*))0x448720)(escape.enemy);
+    }
     if (attached) {
         attached = NULL;
         ((void (__thiscall*)(BYTE*))0x661800)(rayne);
@@ -163,6 +176,18 @@ void StartFeedEscapeRoll(BYTE* rayne, int state, float frame) {
     // Match the native backward ground roll setup at 0x676611.
     const bool alternate = state == 0xC8;
     const int roll = alternate ? 0xCD : 0xD2;
+    __try {
+        if (!ActorHasAnim((DWORD)rayne, roll)) {
+            LogParry("feed-escape-roll-unavailable", 0, roll, 0, state,
+                     0, 0, escape.enemy, rayne, 0, frame, 0, 0);
+            return;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogParry("feed-escape-roll-unavailable", 0, roll, 0, state,
+                 0, 0, escape.enemy, rayne, 0, frame, 0, 0);
+        return;
+    }
     ((void (__thiscall*)(BYTE*, int, float, float))0x658EB0)(rayne, roll, 0.0f, -1.0f);
     *(int*)(rayne + 0x8350) = alternate ? 0x4F : 0x4B;
     const auto nextEvent = (DWORD (__cdecl*)())0x4030D0;
@@ -220,7 +245,10 @@ bool TickFeedEscape(BYTE* rayne, bool pressed, float gameDeltaMs) {
     if ((pressed && !escape.attempted) || traceWindow || escape.armed) {
         const float start = max(0.0f, escape.first - escape.fps * g_enhanced.feedEscapeWindowMs / 1000.0f);
         float frame = -1.0f;
-        const bool inWindow = FeedEscapeEnemyFrame(frame) && frame >= start && frame < escape.first;
+        const bool validFrame = FeedEscapeEnemyFrame(frame);
+        const bool inWindow = validFrame && frame >= start && frame < escape.first;
+        const bool bladeActive = escape.bladeFollowUp && validFrame &&
+                                 frame >= escape.first && frame <= escape.end;
 #ifdef BR2_COMBAT_TEST
         if (traceWindow && inWindow) {
             escape.windowLogged = true;
@@ -229,12 +257,12 @@ bool TickFeedEscape(BYTE* rayne, bool pressed, float gameDeltaMs) {
         }
 #endif
         if (pressed && !escape.attempted) {
-            escape.attempted = true;
-            escape.armed = inWindow;
+            escape.armed = inWindow || bladeActive;
+            escape.attempted = escape.armed || !escape.bladeFollowUp;
             LogParry(inWindow ? "feed-escape-armed" : "feed-escape-missed", 0, 0, 0,
                      state, 0, 0, escape.enemy, rayne, 0, frame, start, escape.first);
         }
-        if (escape.armed && inWindow) {
+        if (escape.armed && (inWindow || bladeActive)) {
             StartFeedEscapeRoll(rayne, state, frame);
             if (escape.rolled) TickFeedEscapeTravel(rayne, gameDeltaMs);
         }
@@ -244,14 +272,18 @@ bool TickFeedEscape(BYTE* rayne, bool pressed, float gameDeltaMs) {
 
 bool SuppressFeedEscapeHit(BYTE* rayne, BYTE* hit) {
     auto& escape = g_feedEscape;
-    if (escape.rayne != rayne || !FeedEscapeEnabled() ||
-        *(BYTE* const*)(hit + 0x24) != escape.enemy) return false;
+    if (escape.rayne != rayne || !FeedEscapeEnabled()) return false;
+    BYTE* attacker = *(BYTE* const*)(hit + 0x24);
+    if (attacker != escape.enemy && (!attacker || CombatCharacter(attacker) != escape.enemy)) return false;
     const int kind = *(const int*)hit;
     const int state = *(int*)(rayne + 0x17C);
     float frame = -1.0f;
-    const bool valid = (escape.rolled || CombatTraceEnabled()) && FeedEscapeEnemyFrame(frame);
-    const bool block = valid && escape.rolled && FeedEscapeRayneState(state) &&
-        (IsMeleeImpact(kind) || kind == FeedRepelAttack) && frame >= escape.first && frame <= escape.end;
+    const bool valid = (escape.rolled || escape.armed || CombatTraceEnabled()) && FeedEscapeEnemyFrame(frame);
+    const bool followUp = valid && (IsMeleeImpact(kind) || kind == FeedRepelAttack) &&
+                          frame >= escape.first && frame <= escape.end;
+    if (followUp && escape.bladeFollowUp && escape.armed && !escape.rolled && FeedEscapeRayneState(state))
+        StartFeedEscapeRoll(rayne, state, frame);
+    const bool block = followUp && escape.rolled && FeedEscapeRayneState(*(int*)(rayne + 0x17C));
     LogParry(block ? "feed-escape-blocked" : "feed-escape-hit-native", 0, kind,
              *(const int*)(hit + 8), state, 0, *(const DWORD*)(hit + 4), escape.enemy, rayne,
              0, frame, escape.first, escape.end);

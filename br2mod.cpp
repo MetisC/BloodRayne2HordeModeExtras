@@ -97,13 +97,13 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_BARS_CYCLE     0x115
 #define AC_EFFECTS_MENU   0x116
 #define AC_EFFECT_BASE    0x117
-#define AC_BACK           0x11C
-#define AC_SKIN           0x11D
-#define AC_PHOTO          0x11E
-#define AC_CHARACTER      0x11F
-#define AC_EXTRA_BASE     0x120    // 0x120.. extra launches
-#define AC_ARENA_BASE     0x130    // 0x130.. arena launches at selected count
-#define AC_SKIN_PICK_BASE 0x140    // 0x140.. skin list picks
+#define AC_BACK           0x11D
+#define AC_SKIN           0x11E
+#define AC_PHOTO          0x11F
+#define AC_CHARACTER      0x120
+#define AC_EXTRA_BASE     0x121    // 0x121.. extra launches
+#define AC_ARENA_BASE     0x131    // 0x131.. arena launches at selected count
+#define AC_SKIN_PICK_BASE 0x141    // 0x141.. skin list picks
 
 // ----------------------------- data ---------------------------------------
 struct Preset { const char* name; float dmgIn, dmgOut, cost; };
@@ -122,20 +122,93 @@ enum CombatMode { CombatNormal, CombatEnhanced, CombatCount };
 static const char* const COMBAT_NAMES[] = { "Normal", "Enhanced" };
 static int g_combat = CombatEnhanced;
 static volatile LONG g_combatDirty = 0;
-enum CombatEffect { EffectCinematics, EffectHitstop, EffectParry, EffectDodge, EffectStyleHud, EffectCount };
+enum CombatEffect { EffectCinematics, EffectHitstop, EffectParry, EffectDodge, EffectStyleHud, EffectGunCombat, EffectCount };
 static const struct { const char* key; const char* label; } COMBAT_EFFECTS[] = {
     {"finisherCinematics", "Finisher Cinematics"},
     {"impactPause", "Impact Pause"},
     {"parry", "Mod Parry"},
     {"dodgeOffset", "Dodge Offset"},
     {"styleHud", "Style and Combo"},
+    {"gunCombat", "Enhanced Gun Combat"},
 };
 static_assert(_countof(COMBAT_EFFECTS) == EffectCount && AC_EFFECT_BASE + EffectCount == AC_BACK,
               "Combat effect table and menu actions must match");
-static volatile LONG g_effects = (1L << EffectCount) - 1;
+static volatile LONG g_effects = (1L << EffectGunCombat) - 1;
 static volatile LONG g_effectsDirty = 0;
 static bool CombatEffectEnabled(CombatEffect effect) {
     return (g_effects & (1L << effect)) != 0;
+}
+
+// The native gun data uses ammo cost to determine how quickly its shared
+// 0..1000 blood pool is consumed. Keep the native values per CMultiGun so the
+// option can be switched off without leaving any modified gun stats behind.
+// Struct offsets were independently cross-checked against the existing
+// project notes; no Gunsucked code is included or called here.
+static const DWORD GUN_MODE_OFFSETS[] = { 0x2BC, 0x330, 0x3A4, 0x418, 0x48C, 0x500 };
+static int ClassicGunAmmoPoolShots(int gun, int level);
+struct BloodGunAmmoOverride {
+    BYTE* gun;
+    float nativeCosts[6][3];
+    float appliedCosts[6][3];
+};
+static BloodGunAmmoOverride g_bloodGunAmmo[2];
+
+static BYTE* FindPlayerBloodGun() {
+    // Same actor lookup and weapon controller as the native HUD at 0x59209A.
+    BYTE* actor = *(BYTE**)0x7DCD68;
+    if (!actor) return nullptr;
+    BYTE* character = ((BYTE* (__cdecl*)(BYTE*, DWORD))0x4050C0)(actor, *(DWORD*)0x5EC07B0);
+    if (!character) return nullptr;
+    BYTE* gun = ((BYTE* (__thiscall*)(BYTE*))0x666F10)(character + 0x47A4);
+    return gun && *(DWORD*)gun == 0x70BE4C ? gun : nullptr;
+}
+
+static void UpdateBloodGunAmmoPool(bool enabled) {
+    if (!enabled && !g_bloodGunAmmo[0].gun && !g_bloodGunAmmo[1].gun) return;
+    BYTE* primary = FindPlayerBloodGun();
+    BYTE* paired = nullptr;
+    if (primary) {
+        BYTE* next = *(BYTE**)(primary + 0x68C);
+        BYTE* previous = *(BYTE**)(primary + 0x690);
+        if (next && next != primary && *(DWORD*)next == 0x70BE4C &&
+            *(BYTE**)(next + 0x690) == primary)
+            paired = next;
+        else if (previous && previous != primary && *(DWORD*)previous == 0x70BE4C &&
+                 *(BYTE**)(previous + 0x68C) == primary)
+            paired = previous;
+    }
+    for (auto& saved : g_bloodGunAmmo)
+        if (saved.gun != primary && saved.gun != paired) saved = {};
+
+    BYTE* const live[] = {primary, paired};
+    for (BYTE* gun : live) {
+        if (!gun) continue;
+        BloodGunAmmoOverride* saved = nullptr;
+        for (auto& entry : g_bloodGunAmmo)
+            if (entry.gun == gun) saved = &entry;
+        if (!saved && enabled)
+            for (auto& entry : g_bloodGunAmmo)
+                if (!entry.gun) { saved = &entry; break; }
+        if (!saved) continue;
+
+        saved->gun = gun;
+        for (int mode = 0; mode < _countof(GUN_MODE_OFFSETS); ++mode) {
+            for (int level = 0; level < 3; ++level) {
+                float& cost = *(float*)(saved->gun + GUN_MODE_OFFSETS[mode] + 0x20 + level * 4);
+                float& native = saved->nativeCosts[mode][level];
+                float& applied = saved->appliedCosts[mode][level];
+                if (enabled) {
+                    if (!_finite(cost) || cost <= 0.0f || cost > 1000.0f) continue;
+                    if (!applied || cost != applied) native = cost;
+                    applied = 1000.f / ClassicGunAmmoPoolShots(mode, level);
+                    if (cost != applied) cost = applied;
+                } else if (applied && cost == applied) {
+                    cost = native;
+                }
+            }
+        }
+        if (!enabled) *saved = {};
+    }
 }
 static char g_pendingChain[64];
 static int g_legacyGuards = 0;
@@ -421,10 +494,10 @@ static const DWORD OUTFIT_INDEX_CALLS[] = {
 };
 
 struct Entry { const char* title; const char* lvl; };
-// Two arenas, five counts, guns on/off. lvls[0]=no guns, lvls[1]=guns.
+// Five counts per arena, guns on/off. lvls[0]=no guns, lvls[1]=guns.
 // Stock levels (battle_*/spawn_*) load straight from the PODs; chb_* are
 // generated copies (count patches, multigun inject/relocate, retitled
-// scripts) produced by tools/make_modes.py.
+// scripts) produced by tools/make_modes.py and make_campaign_arenas.py.
 #define NUM_CNT 5
 static const int COUNTS[NUM_CNT] = { 15, 25, 50, 100, 250 };
 typedef struct { const char* name; const char* lvls[2][NUM_CNT]; } Arena;
@@ -438,6 +511,51 @@ static const Arena ARENAS[] = {
       { "a1_mansion_part1_battle_15g.lvl", "a1_mansion_part1_battle_25g.lvl",
         "a1_mansion_part1_battle_50g.lvl", "a1_mansion_part1_battle_100g.lvl",
         "a1_mansion_part1_battle_250g.lvl" }} },
+    { "Mansion Fireplace", {{
+        "chb_fireplace_15.lvl", "chb_fireplace_25.lvl", "chb_fireplace_50.lvl",
+        "chb_fireplace_100.lvl", "chb_fireplace_250.lvl" },
+      { "chb_fireplace_15g.lvl", "chb_fireplace_25g.lvl", "chb_fireplace_50g.lvl",
+        "chb_fireplace_100g.lvl", "chb_fireplace_250g.lvl" }} },
+    { "Mansion Rooftop", {{
+        "chb_mansion_roof_15.lvl", "chb_mansion_roof_25.lvl",
+        "chb_mansion_roof_50.lvl", "chb_mansion_roof_100.lvl",
+        "chb_mansion_roof_250.lvl" },
+      { "chb_mansion_roof_15g.lvl", "chb_mansion_roof_25g.lvl",
+        "chb_mansion_roof_50g.lvl", "chb_mansion_roof_100g.lvl",
+        "chb_mansion_roof_250g.lvl" }} },
+    { "Meatpacking Bar", {{
+        "chb_bar_15.lvl", "chb_bar_25.lvl", "chb_bar_50.lvl",
+        "chb_bar_100.lvl", "chb_bar_250.lvl" },
+      { "chb_bar_15g.lvl", "chb_bar_25g.lvl", "chb_bar_50g.lvl",
+        "chb_bar_100g.lvl", "chb_bar_250g.lvl" }} },
+    { "Meatpacking Arena", {{
+        "chb_meatpacking_arena_15.lvl", "chb_meatpacking_arena_25.lvl",
+        "chb_meatpacking_arena_50.lvl", "chb_meatpacking_arena_100.lvl",
+        "chb_meatpacking_arena_250.lvl" },
+      { "chb_meatpacking_arena_15g.lvl", "chb_meatpacking_arena_25g.lvl",
+        "chb_meatpacking_arena_50g.lvl", "chb_meatpacking_arena_100g.lvl",
+        "chb_meatpacking_arena_250g.lvl" }} },
+    { "Shroud Tower Roof", {{
+        "chb_shroud_roof_15.lvl", "chb_shroud_roof_25.lvl",
+        "chb_shroud_roof_50.lvl", "chb_shroud_roof_100.lvl",
+        "chb_shroud_roof_250.lvl" },
+      { "chb_shroud_roof_15g.lvl", "chb_shroud_roof_25g.lvl",
+        "chb_shroud_roof_50g.lvl", "chb_shroud_roof_100g.lvl",
+        "chb_shroud_roof_250g.lvl" }} },
+    { "Insect Plaza", {{
+        "chb_insect_plaza_15.lvl", "chb_insect_plaza_25.lvl",
+        "chb_insect_plaza_50.lvl", "chb_insect_plaza_100.lvl",
+        "chb_insect_plaza_250.lvl" },
+      { "chb_insect_plaza_15g.lvl", "chb_insect_plaza_25g.lvl",
+        "chb_insect_plaza_50g.lvl", "chb_insect_plaza_100g.lvl",
+        "chb_insect_plaza_250g.lvl" }} },
+    { "Woodchipper", {{
+        "chb_woodchipper_15.lvl", "chb_woodchipper_25.lvl",
+        "chb_woodchipper_50.lvl", "chb_woodchipper_100.lvl",
+        "chb_woodchipper_250.lvl" },
+      { "chb_woodchipper_15g.lvl", "chb_woodchipper_25g.lvl",
+        "chb_woodchipper_50g.lvl", "chb_woodchipper_100g.lvl",
+        "chb_woodchipper_250g.lvl" }} },
     { "Mod Horde", {{
         "chb_hor_15.lvl", "chb_hor_25.lvl", "chb_hor_50.lvl",
         "chb_hor_100.lvl", "chb_hor_250.lvl" },
@@ -447,8 +565,11 @@ static const Arena ARENAS[] = {
 #define NUM_ARENAS (sizeof(ARENAS)/sizeof(ARENAS[0]))
 // Flat level list for best-time bookkeeping, built once at init from
 // ARENAS x guns x counts so the tables cannot diverge.
-#define MAX_TRACKS 64
+#define MAX_TRACKS (NUM_ARENAS * 2 * NUM_CNT)
+static_assert(AC_ARENA_BASE + NUM_ARENAS <= AC_SKIN_PICK_BASE,
+              "Challenge action codes overlap skin actions");
 static const char* TRACK_LVLS[MAX_TRACKS];
+static bool TRACK_HAS_GUNS[MAX_TRACKS];
 static int NUM_TRACKS;
 static void BuildTrackList() {
     int i, j, g;
@@ -456,8 +577,10 @@ static void BuildTrackList() {
     for (i = 0; i < (int)NUM_ARENAS; ++i)
         for (g = 0; g < 2; ++g)
             for (j = 0; j < NUM_CNT; ++j)
-                if (ARENAS[i].lvls[g][j] && NUM_TRACKS < MAX_TRACKS)
+                if (ARENAS[i].lvls[g][j]) {
+                    TRACK_HAS_GUNS[NUM_TRACKS] = g != 0;
                     TRACK_LVLS[NUM_TRACKS++] = ARENAS[i].lvls[g][j];
+                }
 }
 static const char* LevelBasename(const char* lvl) {
     const char* base = lvl;
@@ -471,6 +594,10 @@ static int TrackIndexOf(const char* lvl) {
     for (int i = 0; i < NUM_TRACKS; ++i)
         if (!_stricmp(base, LevelBasename(TRACK_LVLS[i]))) return i;
     return -1;
+}
+static bool CurrentChallengeAllowsArsenal() {
+    const int track = TrackIndexOf((const char*)G_CURRENT_LEVEL);
+    return track >= 0 && TRACK_HAS_GUNS[track];
 }
 
 enum ChallengeCharacter {
@@ -810,6 +937,16 @@ static const ModLoc MODL[] = {
  {"Impact Pause", {"Impact Pause","Pause \xE0 l'impact","Pausa all'impatto","Pausa de impacto","Trefferpause",0,"\xCF\xE0\xF3\xE7\xE0 \xEF\xF0\xE8 \xF3\xE4\xE0\xF0\xE5"}},
  {"Mod Parry", {"Parry","Parade","Parata","Parry","Parade",0,"\xCF\xE0\xF0\xE8\xF0\xEE\xE2\xE0\xED\xE8\xE5"}},
  {"Dodge Offset", {"Dodge Offset","Combo apr\xE8s esquive","Combo dopo schivata","Dodge Offset","Dodge Offset",0,"\xCA\xEE\xEC\xE1\xEE \xEF\xEE\xF1\xEB\xE5 \xF3\xEA\xEB\xEE\xED\xE5\xED\xE8\xFF"}},
+ {"Enhanced Gun Combat", {"Enhanced Gun Combat","Armes classiques ameliorees","Combattimento con armi classiche migliorato","Combate con armas de fuego mejorado","Verbesserter Kampf mit klassischen Waffen",0,"\xCF\xF0\xE8\xE2\xE5\xF2\xF1\xF2\xE2\xEE \xE4\xEB\xFF \xEA\xEB\xE0\xF1\xF1\xE8\xF7\xE5\xF1\xEA\xE8\xF5 \xEE\xF0\xF3\xE6\xE8\xE9"}},
+ {"Arsenal Equipped", {"Weapon equipped",0,0,"Arma equipada",0,0,0}},
+ {"Arsenal Stored", {"Weapon stored",0,0,"Arma guardada",0,0,0}},
+ {"Arsenal Ammo", {"rounds",0,0,"balas",0,0,0}},
+ {"Arsenal Ammo Full", {"Ammo full",0,0,"Munici\xF3n al m\xE1ximo",0,0,0}},
+ {"Arsenal Right Hand", {"R",0,0,"D",0,0,0}},
+ {"Arsenal Left Hand", {"L",0,0,"I",0,0,0}},
+ {"Arsenal Wheel Controls", {"Equip: Triangle/Y   Stow: Square/X   Drop: R3/RS",0,0,"Equipar: Triangulo/Y   Guardar: Cuadrado/X   Tirar: R3/RS",0,0,0}},
+ {"Arsenal Wheel Keyboard", {"Equip: F9   Stow: F6   Drop: F8",0,0,"Equipar: F9   Guardar: F6   Tirar: F8",0,0,0}},
+ {"Arsenal Empty", {"Out of ammunition",0,0,"Sin munici\xF3n",0,0,0}},
  {"Style and Combo", {"Style and Combo","Style et combo","Stile e combo","Estilo y combo","Stil und Kombo",0,"\xD1\xF2\xE8\xEB\xFC \xE8 \xEA\xEE\xEC\xE1\xEE"}},
  {"Challenge Mode", {"Challenge Mode","Mode d\xE9""fi","Modalit\xE0 sfida","Modo desaf\xEDo","Herausforderung",0,"\xD0\xE5\xE6\xE8\xEC \xE8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE9"}},
  {"Back to Main Menu", {"Back to Main Menu","Retour au menu principal","Torna al menu principale","Volver al men\xFA principal","Zur\xFC""ck zum Hauptmen\xFC",0,"\xCD\xE0\xE7\xE0\xE4 \xE2 \xE3\xEB\xE0\xE2\xED\xEE\xE5 \xEC\xE5\xED\xFE"}},
@@ -840,6 +977,13 @@ static const ModLoc MODL[] = {
  {"No", {"No","Non","No","No","Nein",0,"\xCD\xE5\xF2"}},
  {"Mod Horde", {"Horde Mode","Mode horde","Modalit\xE0 orda","Modo horda","Horden-Modus",0,"\xD0\xE5\xE6\xE8\xEC \xEE\xF0\xE4\xFB"}},
  {"Mansion Battle", {"Mansion Battle","Bataille du manoir","Battaglia nella villa","Batalla de la mansi\xF3n","Villen-Kampf",0,"\xC1\xE8\xF2\xE2\xE0 \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5"}},
+ {"Mansion Fireplace", {"Mansion Fireplace","Cheminee du manoir","Camino della villa","Chimenea de la mansion","Kamin im Herrenhaus",0,"\xCA\xE0\xEC\xE8\xED \xE2 \xEE\xF1\xEE\xE1\xED\xFF\xEA\xE5"}},
+ {"Meatpacking Bar", {"Meatpacking Bar","Bar de l'abattoir","Bar del mattatoio","Bar de Meatpacking","Schlachthof-Bar",0,"\xC1\xE0\xF0 \xEC\xFF\xF1\xEE\xEA\xEE\xEC\xE1\xE8\xED\xE0\xF2\xE0"}},
+ {"Meatpacking Arena", {"Meatpacking Arena","Arene de l'abattoir","Arena del mattatoio","Arena de Meatpacking","Schlachthof-Arena",0,"\xC0\xF0\xE5\xED\xE0 \xEC\xFF\xF1\xEE\xEA\xEE\xEC\xE1\xE8\xED\xE0\xF2\xE0"}},
+ {"Insect Plaza", {"Insect Plaza","Place des insectes","Piazza degli insetti","Plaza de los insectos","Insektenplatz",0,"\xCF\xEB\xEE\xF9\xE0\xE4\xFC \xED\xE0\xF1\xE5\xEA\xEE\xEC\xFB\xF5"}},
+ {"Mansion Rooftop", {"Mansion Rooftop","Toit du manoir","Tetto della villa","Azotea de la mansion","Villardach",0,"Mansion Rooftop"}},
+ {"Shroud Tower Roof", {"Shroud Tower Roof","Toit de la tour Shroud","Tetto della Torre Shroud","Azotea de la Torre Shroud","Shroud-Turmdach",0,"Shroud Tower Roof"}},
+ {"Woodchipper", {"Woodchipper","Broyeur","Trituratore","Trituradora","Holzhacksler",0,"Woodchipper"}},
  {"Skin", {"Skin","Apparence","Aspetto","Apariencia","Aussehen",0,"\xCE\xE1\xEB\xE8\xEA"}},
  {"Ballroom Guest", {"Ballroom Guest","Invit\xE9""e du bal","Invitata al ballo","Invitada del baile","Ballgast",0,"\xC3\xEE\xF1\xF2\xFC\xFF \xE1\xE0\xEB\xE0"}},
  {"Zerenski Assassin", {"Zerenski Assassin","Tueuse de Zerenski","Sicaria di Zerenski","Sicaria de Zerenski","Zerenskis Attent\xE4terin",0,"\xD3\xE1\xE8\xE9\xF6\xE0 \xC7\xE5\xF0\xE5\xED\xF1\xEA\xE8"}},
@@ -946,8 +1090,27 @@ static void __declspec(naked) HookChallengePause() {
 
 constexpr int KaganWaveCue = 0x7F00;
 static void PlayKaganWave(BYTE* controller);
+namespace {
+void TickConventionalArsenal(BYTE* game);
+void ClearConventionalArsenal(bool release);
+void DrawConventionalArsenalHud(BYTE* game);
+void SuspendArsenalWheel();
+}
 
 #include "parry.inl"
+static int ClassicGunAmmoPoolShots(int gun, int level) {
+    const int pools[6][3] = {
+        { g_enhanced.bloodShotAmmoPoolL1, g_enhanced.bloodShotAmmoPoolL2, g_enhanced.bloodShotAmmoPoolL3 },
+        { g_enhanced.bloodStreamAmmoPoolL1, g_enhanced.bloodStreamAmmoPoolL2, g_enhanced.bloodStreamAmmoPoolL3 },
+        { g_enhanced.bloodSprayAmmoPoolL1, g_enhanced.bloodSprayAmmoPoolL2, g_enhanced.bloodSprayAmmoPoolL3 },
+        { g_enhanced.bloodBombAmmoPoolL1, g_enhanced.bloodBombAmmoPoolL2, g_enhanced.bloodBombAmmoPoolL3 },
+        { g_enhanced.bloodFlameAmmoPoolL1, g_enhanced.bloodFlameAmmoPoolL2, g_enhanced.bloodFlameAmmoPoolL3 },
+        { g_enhanced.bloodHammerAmmoPoolL1, g_enhanced.bloodHammerAmmoPoolL2, g_enhanced.bloodHammerAmmoPoolL3 }
+    };
+    if (gun < 0 || gun >= 6 || level < 0 || level >= 3) return 1;
+    return pools[gun][level];
+}
+static bool ActorHasAnim(DWORD actor, int anim);
 #include "enhanced_combat.inl"
 #include "challenge_specials.inl"
 #include "ferril_player.inl"
@@ -957,6 +1120,9 @@ static int ChallengeBarsRank(int bars) {
 }
 
 static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
+    ClearConventionalArsenal(true);
+    __try { UpdateBloodGunAmmoPool(false); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
     g_ferrilAttack = {};
     g_ninjaShoulder = {};
     g_ferrilSpecialHeld = false;
@@ -1192,12 +1358,40 @@ static void FeedDiagTick() {
 // field (victim+0x48; +0x50 facing is derived from it) so it just stays put.
 // Victims already in the grabbed anim keep the native sync alignment.
 static DWORD g_pinVictim;
-static DWORD g_initVictim;
-static DWORD g_seen73;
+static DWORD g_rearFeedVictim;
+static bool g_rearFeedRequested;
 static int   g_pinActive;
 static float g_pinYaw;
 typedef void (__thiscall* PlayAnim_t)(void* self, int anim, float f1, float f2);
 #define PLAYANIM ((PlayAnim_t)0x658EB0)
+static bool ControllerHasAnim(DWORD controller, int anim) {
+    const BYTE* skeleton = *(const BYTE* const*)(controller + 0x20);
+    // CSkeleton::getPoseFrame checks the index against this clip count.
+    return skeleton && anim >= 0 && anim < *(const int*)(skeleton + 0x2418)
+        && *(const void* const*)(skeleton + 0x241C);
+}
+
+static bool ActorHasAnim(DWORD actor, int anim) {
+    return ControllerHasAnim(actor + 0x158, anim);
+}
+
+// bite_behind_on (male victim) and bite_female_behind_on (female victim).
+static bool IsRearFeedAnim(DWORD anim) {
+    return anim == 0xF3 || anim == 0xF4;
+}
+
+static bool RearFeedHoldsVictim(DWORD victim) {
+    const DWORD rayne = *(const DWORD*)RayneActor;
+    return rayne && IsRearFeedAnim(*(const DWORD*)(rayne + 0x17C)) &&
+           *(const DWORD*)(rayne + 0x83C0) == victim;
+}
+
+static bool __fastcall ConfirmRearFeed(DWORD victim, void*, int result, BYTE* held, int* response) {
+    // Both results admit the grab, but only 3 starts the held pose.
+    if (result == 2 && RearFeedHoldsVictim(victim) && ActorHasAnim(victim, 0x73))
+        result = 3;
+    return ((bool (__thiscall*)(DWORD, int, BYTE*, int*))0x5BC180)(victim, result, held, response);
+}
 // The native grabbed anim the victim should hold per Rayne wind-up anim
 // (from live feed logs: f3->0x73, e3->0x42, e5->0x70, e7->0x71).
 static int FeedExpectedVictimAnim(DWORD ranim) {
@@ -1205,7 +1399,8 @@ static int FeedExpectedVictimAnim(DWORD ranim) {
     case 0xE3: return 0x42;
     case 0xE5: return 0x70;
     case 0xE7: return 0x71;
-    case 0xF3: return 0x73;
+    case 0xF3:
+    case 0xF4: return 0x73;
     }
     return -1;
 }
@@ -1219,11 +1414,21 @@ static int FeedExpectedVictimAnim(DWORD ranim) {
 static int __cdecl AdjustMotionRequest(DWORD controller, int requested, float* timing) {
     constexpr int die1 = 212;
     constexpr int dead1 = 213;
+    if (requested >= 0) {
+        __try {
+            if (!ControllerHasAnim(controller, requested)) return 1;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    }
     if (requested == dead1 && *(const int*)(controller + 0x24) == die1) {
         BYTE* player = *(BYTE**)RayneActor;
         if (player && controller == (DWORD)(player + 0x158)) {
             const auto character = ActiveChallengeCharacter();
             if (character == ChallengeKestral) {
+                __try {
+                    if (!ControllerHasAnim(controller, requested)) return 1;
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
                 // Both states share one clip. Hold the last pose in dead1
                 // without blending through the standing start of the clip.
                 const auto motion = (const BYTE* (__thiscall*)(DWORD, int))0x606020;
@@ -1236,7 +1441,7 @@ static int __cdecl AdjustMotionRequest(DWORD controller, int requested, float* t
         return 0;                       // grabbed family -> always allow
     __try {
         DWORD rayne = *(DWORD*)0x61276EC;
-        if (!rayne || *(DWORD*)(rayne+0x17C)!=0xF3) return 0;
+        if (!rayne || !IsRearFeedAnim(*(DWORD*)(rayne+0x17C))) return 0;
         DWORD victim = *(DWORD*)(rayne+0x83C0);
         if (!victim || controller!=victim+0x158) return 0;
         if (*(DWORD*)(victim+0x17C)!=0x73 || !(*(float*)(victim+0x39C8)>0.0f)) return 0;
@@ -1279,29 +1484,32 @@ static void FeedYawPinTick() {
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; return; }
     int expected = FeedExpectedVictimAnim(ranim);
+    if (!IsRearFeedAnim(ranim) || victim != g_rearFeedVictim) {
+        g_rearFeedVictim = 0;
+        g_rearFeedRequested = false;
+    }
     if (!victim || expected < 0) { g_pinVictim = 0; g_pinActive = 0; return; }
-    if (ranim==0xF3) {
-        // Native contact usually requests 0x73 at frame 0 -- but victims in
-        // combat anims (0x11/0x19/0x6A/...) are never granted it by the
-        // classifier and keep attacking/turning through the whole wind-up.
-        // Fire the same request ONCE per victim (re-fire only if it already
-        // held 0x73 and was bounced out -- an ineligible victim degrades to
-        // native behaviour, never a request spam/restart loop).
+    __try {
+        if (!ActorHasAnim(victim, expected)) {
+            g_pinVictim = 0;
+            g_pinActive = 0;
+            return;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; return; }
+    if (IsRearFeedAnim(ranim)) {
+        // F3/F4 already selected a rear grab. Use its victim pose regardless
+        // of any rotation during the approach.
         __try {
-            int alive = (*(float*)(victim + 0x39C8) > 0.0f);
-            if (vanim == 0x73) g_seen73 = victim;
-            int kicked = (g_initVictim != victim) || (g_seen73 == victim);
-            if (vanim != 0x73 && vanim != 0x74 && alive && kicked) {
+            if (!(*(float*)(victim + 0x39C8) > 0.0f)) return;
+            g_rearFeedVictim = victim;
+            if (vanim == 0x73 || vanim == 0x74) {
+                g_rearFeedRequested = true;
+                return;
+            }
+            if (!g_rearFeedRequested) {
+                g_rearFeedRequested = true;
                 PLAYANIM((void*)victim, 0x73, 0.0f, -1.0f);
-                g_initVictim = victim;
-                if (victim != g_pinVictim || !g_pinActive) {
-                    g_pinVictim = victim;
-                    g_pinYaw = *(float*)(victim + 0x48);
-                    g_pinActive = 1;
-                }
-                *(float*)(victim + 0x48) = g_pinYaw;
-            } else {
-                g_pinActive = 0;   // held: native sync alignment owns yaw
             }
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; }
@@ -1335,6 +1543,11 @@ static void FeedYawPinTick() {
 // and the normal timer update. Blank banners cannot overwrite us later in
 // the same frame. The script interpreter and the level loader stay native.
 static void __cdecl HudTick() {
+    SampleEnhancedSettings();
+    __try {
+        UpdateBloodGunAmmoPool(g_combat == CombatEnhanced && CombatEffectEnabled(EffectGunCombat));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (g_photoBlockingMenu) return;
     TrackHudLevel();
     FeedDiagTick();
@@ -1342,6 +1555,10 @@ static void __cdecl HudTick() {
     const char* lvl = (const char*)0x5E33258;
     int menuOpen = *(DWORD*)0x5EF4BF8 != 0;   // any menu open -> not in gameplay
     DWORD gso = *(DWORD*)0x7C07F8;
+    if (gso && !menuOpen) {
+        __try { DrawConventionalArsenalHud((BYTE*)gso); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
     if (gso && !menuOpen) DrawCombatCombo((BYTE*)gso);
     // Game-time clock: the engine's own scaled world delta (slow-mo factor
     // already applied by the game; pauses/menus are excluded by the gate).
@@ -1520,6 +1737,7 @@ static void __declspec(naked) AddMenuItem(const char* text, int action,
 }
 
 #include "photo_mode.inl"
+#include "conventional_arsenal.inl"
 
 // ------------------------- menu build logic --------------------------------
 static void BuildChallengeMenu();
@@ -1704,6 +1922,8 @@ static int __cdecl DispatchOurs(int action) {
     if (action >= AC_EFFECT_BASE && action < AC_EFFECT_BASE + EffectCount) {
         if (g_combat == CombatEnhanced && *(int*)G_MENU_STATE == MENU_EFFECTS) {
             const LONG bit = 1L << (action - AC_EFFECT_BASE);
+            if (bit == (1L << EffectGunCombat) && g_runBars >= 0 && !g_runDone)
+                g_runCombatChanged = true;
             InterlockedXor(&g_effects, bit);
             InterlockedOr(&g_effectsDirty, bit);
             *(unsigned char*)G_MENU_REBUILD = 1;
@@ -2639,9 +2859,13 @@ static void LoadConfig() {
     GetPrivateProfileStringA("Combat", "mode", COMBAT_NAMES[CombatEnhanced],
                              buf, sizeof buf, ".\\br2mod.ini");
     g_combat = !_stricmp(buf, "Enhanced") ? CombatEnhanced : CombatNormal;
-    for (int effect = 0; effect < EffectCount; ++effect)
-        if (!GetPrivateProfileIntA("Combat", COMBAT_EFFECTS[effect].key, 1, ".\\br2mod.ini"))
-            g_effects &= ~(1L << effect);
+    InterlockedExchange(&g_effects, 0);
+    for (int effect = 0; effect < EffectCount; ++effect) {
+        const int defaultEnabled = effect == EffectGunCombat ? 0 : 1;
+        if (GetPrivateProfileIntA("Combat", COMBAT_EFFECTS[effect].key,
+                                  defaultEnabled, ".\\br2mod.ini"))
+            InterlockedOr(&g_effects, 1L << effect);
+    }
     GetPrivateProfileStringA("Appearance", "skin", "default",
                              g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
     g_ferrilTattoo = GetPrivateProfileIntA("Appearance", "ferrilTattoo", 1,
@@ -2702,6 +2926,51 @@ static void LoadConfig() {
     }
 }
 
+static void InstallConventionalArsenal() {
+    struct Site { DWORD address; const char* expected; int length; void* target; bool call; };
+    const Site sites[] = {
+        {0x4F88B8, "\xE8\x93\xF5\xFF\xFF", 5, MapArsenalPad, true},
+        {0x4F88C2, "\xE8\x89\xC9\xFF\xFF", 5, MapArsenalKeyboard, true},
+        {0x584F4B, "\xE8\xB0\xFB\xFF\xFF\x89\x45\xFC\xDB\x45\xFC", 11, BloodProjectileCost, true},
+        {0x5863E4, "\x8B\x8E\x8C\x06\x00\x00\x85\xC9\x74\x1D\x8B\x01\x8B\x90\x5C\x01\x00\x00\xFF\xD2\x8B\xCE\x8B\xF8\xE8\xFF\xE6\xFF\xFF\x2B\xC7\x89\x45\x08\xDB\x45\x08\xEB\x1D"
+                   "\x8B\x06\x8B\x90\x5C\x01\x00\x00\x8B\xCE\xFF\xD2\x8B\xCE\x8B\xF8\xE8\xE0\xE6\xFF\xFF\x2B\xC7\x89\x45\x08\xDB\x45\x08", 68, LoadBloodShotShortfall, true},
+        {0x592252, "\xFF\xD0\x89\x45\xFC\xDB\x45\xFC\x8B\xCF", 10, LoadBloodHudReserve, true},
+        {0x59228C, "\xE8\x6F\x28\xFF\xFF\x89\x45\xFC\xDB\x45\xFC", 11, BloodHudCost, true},
+        {0x65CB11, "\xE8\xCA\x11\x01\x00", 5, StartBloodGunFireOrSuppress, true},
+        {0x65CCB9, "\xE8\x22\x10\x01\x00", 5, StartBloodGunFireOrSuppress, true},
+        {0x65D747, "\xE8\x94\x05\x01\x00", 5, StartBloodGunFireOrSuppress, true},
+        {0x65E5C8, "\xE8\x13\xF7\x00\x00", 5, StartBloodGunFireOrSuppress, true},
+        {0x65EBAA, "\xE8\x31\xF1\x00\x00", 5, StartBloodGunFireOrSuppress, true},
+        {0x677106, "\xE8\xD5\x6B\xFF\xFF", 5, StartBloodGunFireOrSuppress, true},
+        {0x507FF0, "\x56\x8B\xF1\x8B\x06\x8B\x90\x00\x01\x00\x00", 11, DrawConventionalGun, false},
+        {0x5098C6, "\xE8\x75\xE0\xFF\xFF", 5, OnConventionalGunDestroyed, true},
+        {0x58461D, "\xE8\xCE\x8F\xFF\xFF", 5, DrawBloodGunModel, true},
+        {0x5874D7, "\xE8\xD4\xEE\xFF\xFF", 5, FireBloodGunOrSuppress, true},
+        {0x67110C, "\xE8\x9F\x52\xF1\xFF", 5, FireBloodGunOrSuppress, true},
+        {0x6712D3, "\xE8\x98\xCC\xFF\xFF", 5, UpdateConventionalArm, true},
+        {0x6712E8, "\xE8\x83\xCC\xFF\xFF", 5, UpdateConventionalArm, true},
+        {0x67116C, "\xE8\x3F\x52\xF1\xFF", 5, FireBloodGunOrSuppress, true},
+        {0x67330F, "\xE8\x9C\x30\xF1\xFF", 5, FireBloodGunOrSuppress, true},
+        {0x673CC1, "\xE8\xEA\x26\xF1\xFF", 5, FireBloodGunOrSuppress, true},
+        {0x673CF4, "\xE8\xB7\x26\xF1\xFF", 5, FireBloodGunOrSuppress, true},
+    };
+    for (const auto& site : sites) {
+        if (memcmp((const void*)site.address, site.expected, site.length)) {
+            Trace("ARSENAL disabled: signature mismatch at %08lX", site.address);
+            return;
+        }
+    }
+    for (const auto& site : sites) {
+        if (site.call) PatchCallChecked(site.address, site.expected, site.length, site.target);
+        else PatchChecked(site.address, site.expected, site.length, site.target);
+        const BYTE opcode = *(const BYTE*)site.address;
+        if (opcode != (site.call ? 0xE8 : 0x68)) return;
+        const DWORD target = *(const DWORD*)(site.address + 1) + (site.call ? site.address + 5 : 0);
+        if (target != (DWORD)site.target) return;
+    }
+    g_arsenalReady = true;
+}
+
 static DWORD WINAPI Worker(LPVOID) {
     InitTrace();
     LoadConfig();
@@ -2725,6 +2994,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x559F10,"\xa1\xac\x48\xef\x05\x83\xf8\x01",8,HookMenuBack);
     PatchChecked(0x55EB10,"\x55\x8b\xec\x6a\xff\x68\xf5\x27\x6d\x00",10,HookMenuBegin);
     PatchChecked(0x609D90,"\x55\x8b\xec\x56\x8b\xf1",6,HookFeedMotionRequest);
+    PatchCallChecked(0x5C6FE9,"\xE8\x92\x51\xFF\xFF",5,ConfirmRearFeed);
     PatchChecked(0x56A170,"\x55\x8b\xec\x8b\x45\x08",6,HookGetBonePos);
     PatchSite((void*)0x561E1A, 6, HookA);
     PatchChecked(0x5640B9,"\xDB\x85\x3C\xFA\xFF\xFF",6,HookOptionsPanelHeight);
@@ -2791,6 +3061,7 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchCallChecked(0x4D5E58,"\xE8\xE3\xFB\xFF\xFF",5,HookChallengeBarsRank);
     PatchCallChecked(0x4D5ECB,"\xE8\x70\xFB\xFF\xFF",5,HookChallengeBarsRank);
     InstallPhotoMode();
+    InstallConventionalArsenal();
     // 0x4CD940 (display setter call) detour removed: unstable, see note above.
     ApplyPreset();
     for (unsigned i = 0; i < sizeof(HEALTH_DMG_SITES)/sizeof(HEALTH_DMG_SITES[0]); ++i)

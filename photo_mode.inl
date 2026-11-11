@@ -156,6 +156,7 @@ void BeginPhoto(DWORD now, int padSlot, bool fromGameplay) {
     g_photoFromGameplay = fromGameplay;
     if (fromGameplay) SetPhotoAudioPause(true);
     PhotoGlobal<LONG>(NativeMouseX) = PhotoGlobal<LONG>(NativeMouseY) = 0;
+    SuspendArsenalWheel();
     g_photoBlockingMenu = true;
 }
 

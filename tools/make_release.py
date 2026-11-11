@@ -19,7 +19,12 @@ GENERATED = (
      ("100", "250", "15g", "25g", "50g", "100g", "250g")] +
     ["chb_hor_%s" % n for n in
      ("15", "25", "50", "100", "250",
-      "15g", "25g", "50g", "100g", "250g")]
+      "15g", "25g", "50g", "100g", "250g")] +
+    ["%s_%s" % (arena, count) for arena in
+     ("chb_fireplace", "chb_bar", "chb_meatpacking_arena", "chb_insect_plaza",
+      "chb_mansion_roof", "chb_shroud_roof", "chb_woodchipper")
+     for count in ("15", "25", "50", "100", "250",
+                   "15g", "25g", "50g", "100g", "250g")]
 )
 RETITLED = ["A1_MANSION_PART1_BATTLE_%s" % n for n in ("EASY", "NORMAL", "HARD")]
 SCENE    = ["menu_level", "HUB5"]
@@ -46,7 +51,7 @@ README_TXT = """BloodRayne 2: Terminal Cut - Challenge Mode & Extras (br2mod)
 WHAT IT IS
 ----------
 Independent dinput8.dll proxy mod. Adds a Challenge Mode entry to the
-main menu (Mansion Battle / Horde Mode, 15-250 enemies, optional guns,
+main menu (eight campaign arenas plus Horde Mode, 15-250 enemies, optional guns,
 best times), a global Difficulty preset selector under Options
 (including a Custom preset driven by br2mod.ini), a global Skin
 selector, and localized mod strings for all six game languages.
@@ -97,7 +102,7 @@ Your save games and POD archives are never touched. br2mod_times.ini
 QUE ES
 ------
 Mod proxy dinput8.dll independiente. Anade un modo Desafio al menu
-principal (Batalla en la Mansion / Modo Horda, 15-250 enemigos, armas
+principal (ocho arenas de campa\u00f1a y Modo Horda, 15-250 enemigos, armas
 opcionales, mejores tiempos), un selector global de Dificultad en
 Opciones (incluido un preset Custom en br2mod.ini), un selector global
 de Skin, y cadenas del mod traducidas a los seis idiomas del juego.

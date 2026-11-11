@@ -9,8 +9,9 @@ Gunsucked).
 ## What it adds
 
 - **Challenge Mode** entry on the main menu:
-  - Two native arena types: **Mansion Battle** (the `A1_MANSION_PART1_BATTLE_*`
-    infiltrated-party fight) and **Horde Mode** (the `SPAWN_*` arena)
+  - Nine arena types in campaign order: **Mansion Battle**, **Mansion Fireplace**,
+    **Mansion Rooftop**, **Meatpacking Bar**, **Meatpacking Arena**,
+    **Shroud Tower Roof**, **Insect Plaza**, **Woodchipper**, and **Horde Mode**
   - **Enemies** cycler — 15 / 25 / 50 / 100 / 250
   - **Guns** toggle — Yes/No, persisted in the ini
   - **Health and Rage** toggle — Base (1,000 each) or Maximum (2,000 each),
@@ -34,6 +35,38 @@ Gunsucked).
   are reloaded automatically and include a switch for each mechanic.
   Normal uses the original combat rules. Challenge time records have
   separate Normal and Enhanced profiles.
+- **Enhanced Gun Combat** under Combat Effects increases blood ammunition
+  and enables automatic pickup. Rayne can carry two of each conventional
+  type. A new copy fills a free hand, right first, or goes into the inventory.
+  Further copies refill equipped weapons first, then stored copies, and
+  disappear. The arena must have Guns enabled in Challenge Mode.
+
+| Action | Keyboard | Xbox | DualSense |
+| --- | --- | --- | --- |
+| Open the wheel | Hold F7 | Hold RT | Hold R2 |
+| Highlight an entry | Left / Right | Right stick or D-pad left / right | Right stick or D-pad left / right |
+| Equip | F9 | Y | Triangle |
+| Stow | F6 | X | Square |
+| Drop | F8 | Click right stick | R3 |
+
+The wheel lists all conventional types and the six blood gun modes. Grey
+entries are unavailable. The number is the inventory count. Amber marks the
+right hand and blue marks the left. Releasing the wheel button closes it.
+Equipping a new type with both hands occupied replaces the right weapon.
+Equipping a second copy replaces the weapon in the opposite hand. Stow and
+drop act on the left copy first when both hands carry the same type.
+
+Blood guns provide two copies after their native unlock. Both use the same
+mode and share a reserve. Each shot spends half the cost of a pair. The
+HUD counts paired shots with both equipped and individual shots with one.
+Blood guns can be stowed. Conventional weapons can be dropped and picked up
+again after stepping away. An empty discard despawns after five gameplay
+seconds by default. Weapons are local to the current level.
+
+Fire uses the original binding. If the controller had fire on RT/R2, the
+arsenal uses the former cycle-weapons button for fire while enabled.
+Arsenal tuning lives in `br2mod_combat.ini`.
+
 - Global **Appearance/Skin** under Options: `Default` keeps the native /
   Gunsucked outfit behaviour; any other entry forces that skin everywhere
 - In-challenge HUD: localized kill counter `Kills: N/M` and a localized
@@ -51,7 +84,7 @@ Gunsucked).
 |---|---|
 | BloodRayne 2: Terminal Cut | Target game (32-bit `rayne2.exe`, 2022 build) |
 | MSVC x86 toolchain | Builds `dinput8.dll` (`build.bat` calls `vcvarsall x86`; default path assumes VS 2022 Community — edit `VCVARS` for other editions) |
-| Python 3 (stdlib only) | `tools/pod3.py`, `tools/make_modes.py`, `tools/build_msglist.py`, `tools/verify_modes.py` |
+| Python 3 (stdlib only) | `tools/pod3.py`, `tools/make_modes.py`, `tools/make_campaign_arenas.py`, `tools/build_msglist.py` |
 
 ## Environment setup
 
@@ -73,6 +106,7 @@ python tools/pod3.py extract <game>\LANGUAGE.POD  extracted\language
 
 ```
 python tools/make_modes.py  --src extracted\common\WORLD   --dst <game>\world
+python tools/make_campaign_arenas.py --src extracted\common\WORLD --dst <game>\world
 python tools/build_msglist.py --src extracted\language\WORLD --dst <game>\world
 ```
 
@@ -82,13 +116,9 @@ python tools/build_msglist.py --src extracted\language\WORLD --dst <game>\world
 script/root-name retargeting (`a1_mansion_part1_battle_*` keeps the native
 party-dress rule; `chb_hor_*` for horde). `build_msglist.py` writes an
 augmented `world\<LANG>\msglist.txt` per language with the mod's strings.
-
-```
-python tools/verify_modes.py <game>\world
-```
-
-validates the full 20-variant matrix (headers, actor counts, script deps,
-weapon counts, warp commands). Expect `ALL OK`.
+`make_campaign_arenas.py` builds five-count, guns-on/off copies of seven story
+rooms. It replaces the story SCBs, disables story triggers and static hostiles,
+closes doors, adds player barriers, and keeps the fireplace and bar-fan hazards.
 
 ### 4. Deploy
 

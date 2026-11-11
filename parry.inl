@@ -305,6 +305,8 @@ float __fastcall HookEnhancedActorUpdate(void* channel, void*) {
 
 void __fastcall HookParryInput(BYTE* game, void*) {
     ((void (__thiscall*)(BYTE*))0x4F8820)(game);
+    __try { TickConventionalArsenal(game); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ClearConventionalArsenal(true); }
     BYTE* rayne = *(BYTE**)0x7DCD68;
     TickFerrilInput(rayne, game);
     if (g_combat != CombatEnhanced || !rayne || !*(void**)G_SITUATION || g_photoBlockingMenu ||

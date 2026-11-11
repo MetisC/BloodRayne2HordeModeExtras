@@ -19,6 +19,8 @@ import argparse
 import os
 import re
 
+import make_arena
+
 # (out_base, source_level_stem, maxNumberSpawn or None, gun_op)
 # gun_op: None = leave weapons, "inject" = add multiguns, "nude" = move them,
 #         "horde_guns"/"horde_nude" = horde: hero spawns stock (weapon
@@ -143,23 +145,6 @@ def horde_setup(lvl, guns):
     return lvl
 
 
-def mansion_gun_warp(scb):
-    # The mansion levels run with gun mode DISABLED (Zerenski's infiltration
-    # party; stock story scripts call enableGunMode(single) when Rayne gets
-    # her guns back in PART4/5). Without it the proximity pickup never fires.
-    # Also warpTo the guns with the hero (stock weapon-warp pattern): if the
-    # spawn equip already ran they ride along, if not they land on him.
-    toks = scb[12:].split(b"\x00")
-    ins = [b"enableGunMode(single)",
-           b"warpTo(Multigun0, wp_harpooncine1)",
-           b"warpTo(Multigun1, wp_harpooncine1)"]
-    i = toks.index(b"warpTo(0MainCharacter0, wp_harpooncine1)")
-    out = toks[:i + 1] + ins + toks[i + 1:]
-    nb = b"\x00".join(out)
-    return scb[:4] + (len([t for t in out if t])).to_bytes(4, "little") + \
-        len(nb).to_bytes(4, "little") + nb
-
-
 def horde_warp(scb, guns):
     # Insert "warpTo(<actor>, wp_chb_horde)" right after the init "gosub Both"
     # -- i.e. before :mainloop. Weapons are warped too (stock pattern): if the
@@ -231,11 +216,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
+    ap.add_argument("--mansion-only", action="store_true")
     a = ap.parse_args()
 
     tmpl = open(find(a.src, "SPAWN"), "rb").read().decode("cp1252")
 
     for out, stem, maxn, guns in VARIANTS:
+        if a.mansion_only and not out.lower().startswith("a1_mansion_part1_battle_"):
+            continue
         lvl = open(find(a.src, stem), "rb").read().decode("cp1252")
         raw = None
         for f in os.listdir(a.src):
@@ -252,15 +240,38 @@ def main():
                          lambda m: m.group(1) + out, lvl, count=1)
         assert n == 1, "root name not found in " + stem
 
-        raw = retitle(raw)
-        if maxn:
-            lvl, trig = patch_max(lvl, maxn)
+        if out.lower().startswith("a1_mansion_part1_battle_"):
+            arena_count = maxn or {"EASY": 15, "NORMAL": 25, "HARD": 50}[stem.rsplit("_", 1)[1]]
+            waypoint = "wp_harpooncine1"
+            trigger = "ST_Adv_Combat_Tute_Help"
+            lvl = make_arena.strip_arena_cinematics(lvl)
+            lvl, weapon_names = make_arena.prepare_arena_player(lvl)
+            if guns == "inject":
+                lvl = inject_guns(lvl, tmpl)
+                weapon_names += ["Multigun0", "Multigun1"]
+            stock = next(m[1] for m in make_arena.TRIG_BLK.finditer(lvl) if m[2] == trigger)
+            desired = min(int(re.search(r'^\t(\d+)[ \t]+// desiredNumberOfActiveEnemiesInArea',
+                                        stock, re.M)[1]), 4)
+            lvl = make_arena.make_lvl(
+                lvl, stem, out, trigger, arena_count, desired, make_arena.ARENA_FINISH_FLAG,
+                arena_cleanup=True, spawn_rule=2, must_face=1)
+            bounds = (-250, -139, -145, -317, -202)
+            lvl = make_arena.cover_arena_wave(lvl, trigger, bounds)
+            lvl = make_arena.add_perimeter(lvl, bounds)
+            setup = [t.decode("cp1252") for t in raw[12:].split(b"\x00")[:5]
+                     if t.startswith(b"enablePathPoint(")]
+            # The old script's activateTrigger command targets CTrigger,
+            # not CSpawnTrigger. This native wave starts on volume entry.
+            arm = ["createActor(%s)" % trigger]
+            raw = make_arena.build_scb(make_arena.wave_script(
+                waypoint, setup, arm, make_arena.ARENA_FINISH_FLAG, "music_wavefight2_loop.wav",
+                weapon_names, guns=guns == "inject"))
         else:
-            trig = None
-        if guns == "inject":
-            lvl = inject_guns(lvl, tmpl)
-            raw = mansion_gun_warp(raw)
-        elif guns == "nude":
+            raw = retitle(raw)
+            if maxn:
+                lvl, _ = patch_max(lvl, maxn)
+
+        if guns == "nude":
             lvl = nude_guns(lvl)
         elif guns == "horde_guns":
             lvl = horde_setup(lvl, guns=True)
