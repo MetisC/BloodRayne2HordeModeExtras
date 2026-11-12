@@ -312,6 +312,10 @@ static constexpr ModOutfit ModOutfits[] = {
     // (official ART\PS2\* assets shipped dormant in W32ART3.POD).
     {0x4252E024, "br2_rayne_ps2", "Standard PS2", "br2_rayne_ps2.dfm", "rayne.jug",
      "models\\br2_rayne_ps2.bfm", nullptr, nullptr},
+    // Cut-content character Mora: museum statue mesh (~MORA.SMB) rigged onto
+    // Rayne's skeleton via generated BFM; textures from W32ART.POD.
+    {0x4252E025, "br2_mora", "Mora", "br2_mora.dfm", "rayne.jug",
+     "models\\br2_mora.bfm", nullptr, nullptr},
     {0x4252E005, "br2_fpunk_female", "Punk 1", "br2_fpunk_female.dfm", "br2_fpunk_female.jug",
      "models\\br2_fpunk_female.bfm", nullptr, "models\\br2_fpunk_female.jug"},
     {0x4252E006, "br2_fpunk_female_2", "Punk 2", "br2_fpunk_female_2.dfm", "br2_fpunk_female.jug",
