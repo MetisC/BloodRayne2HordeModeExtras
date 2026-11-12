@@ -96,7 +96,7 @@ T = {
  "Mod Parry": {"ES":"Parry","DE":"Parade","FR":"Parade","IT":"Parata","RU":"Парирование"},
  "Dodge Offset": {"ES":"Dodge Offset","DE":"Dodge Offset","FR":"Combo après esquive","IT":"Combo dopo schivata","RU":"Комбо после уклонения"},
  "Style and Combo": {"ES":"Estilo y combo","DE":"Stil und Kombo","FR":"Style et combo","IT":"Stile e combo","RU":"Стиль и комбо"},
- "Challenge Mode":      {"ES":"Modo desafío","DE":"Herausforderung","FR":"Mode défi","IT":"Modalità sfida","RU":"Режим испытаний"},
+ "Challenge Mode":      {"ES":"Modo Desafío","DE":"Herausforderung","FR":"Mode Défi","IT":"Modalità Sfida","RU":"Режим Испытаний"},
  "Back to Main Menu":   {"ES":"Volver al menú principal","DE":"Zurück zum Hauptmenü","FR":"Retour au menu principal","IT":"Torna al menu principale","RU":"Назад в главное меню"},
  "Best Time":           {"ES":"Mejor tiempo","DE":"Bestzeit","FR":"Meilleur temps","IT":"Miglior tempo","RU":"Лучшее время"},
  "Time":                {"ES":"Tiempo","DE":"Zeit","FR":"Temps","IT":"Tempo","RU":"Время"},

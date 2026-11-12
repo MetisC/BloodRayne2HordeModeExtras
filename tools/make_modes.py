@@ -275,7 +275,12 @@ def main():
                 arena_cleanup=True, spawn_rule=2, must_face=1)
             bounds = (-250, -139, -145, -317, -202)
             lvl = make_arena.cover_arena_wave(lvl, trigger, bounds)
-            lvl = make_arena.add_perimeter(lvl, bounds)
+            # Mansion enemies can flee through these walls even though Rayne cannot.
+            # Keep the wave's hostile character classes inside the arena as well.
+            boundary_classes = (
+                "CMainCharacter|CBrute|CFPunk|CKestral|CLPunk|CPunkMain|CZPunk|CZPunkf|FPunk"
+            )
+            lvl = make_arena.add_perimeter(lvl, bounds, boundary_classes)
             setup = [t.decode("cp1252") for t in raw[12:].split(b"\x00")[:5]
                      if t.startswith(b"enablePathPoint(")]
             # The old script's activateTrigger command targets CTrigger,

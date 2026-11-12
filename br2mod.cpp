@@ -104,6 +104,7 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_EXTRA_BASE     0x121    // 0x121.. extra launches
 #define AC_ALL_GUNS_CYCLE 0x126    // all conventional weapons at arena start
 #define AC_HEADER         0x127    // section separators: selectable, no action
+#define AC_ARENA_MUSIC_CYCLE 0x128 // Challenge-only music selection
 #define AC_ARENA_BASE     0x131    // 0x131.. arena launches at selected count
 #define AC_SKIN_PICK_BASE 0x141    // 0x141.. skin list picks
 
@@ -307,6 +308,10 @@ static constexpr ModOutfit ModOutfits[] = {
      "models\\br2_ninjaf.bfm", nullptr, nullptr},
     {0x4252E023, "br2_ferril", "Ferril", "br2_ferril.dfm", "br2_ferril.jug",
      "models\\br2_ferril.bfm", "data\\br2_ferril.skb", "models\\br2_ferril.jug"},
+    // Literal standard clone: same model/skeleton/physics, PS2 texture set
+    // (official ART\PS2\* assets shipped dormant in W32ART3.POD).
+    {0x4252E024, "br2_rayne_ps2", "Standard PS2", "br2_rayne_ps2.dfm", "rayne.jug",
+     "models\\br2_rayne_ps2.bfm", nullptr, nullptr},
     {0x4252E005, "br2_fpunk_female", "Punk 1", "br2_fpunk_female.dfm", "br2_fpunk_female.jug",
      "models\\br2_fpunk_female.bfm", nullptr, "models\\br2_fpunk_female.jug"},
     {0x4252E006, "br2_fpunk_female_2", "Punk 2", "br2_fpunk_female_2.dfm", "br2_fpunk_female.jug",
@@ -892,6 +897,78 @@ static void __declspec(naked) HookMenuBack() {
 
 static bool g_challengeSession;
 static bool g_photoBlockingMenu;
+// Challenge arena music. Index zero preserves each arena's native soundtrack.
+struct ChallengeMusic { const char* cue; const char* label; };
+static const ChallengeMusic CHALLENGE_MUSIC[] = {
+    { NULL, NULL },
+    { NULL, "Random" },
+    { "music_bar_loop.wav", "Music Bar" },
+    { "music_boss2_loop.wav", "Music Boss II" },
+    { "music_boss3_loop.wav", "Music Boss III" },
+    { "music_club_loop.wav", "Music Club" },
+    { "Music_Ephemera_Loop.wav", "Music Ephemera" },
+    { "music_ferril_body_loop.wav", "Music Ferril" },
+    { "Music_Ferril_intro_loop.wav", "Music Ferril Intro" },
+    { "music_kagan_loop.wav", "Music Kagan" },
+    { "music_slezz_boss_loop.wav", "Music Slezz" },
+    { "music_wavefight1_loop.wav", "Music Wave I" },
+    { "music_wavefight2_loop.wav", "Music Wave II" },
+    { "music_wave_fight2_loop.wav", "Music Wave III" },
+    { "music_wave_fight3_loop.wav", "Music Wave IV" },
+    { "music_wave_fight4_loop.wav", "Music Wave V" },
+    { "music_wave_fight5_loop.wav", "Music Wave VI" },
+    { "Brawl-1116826", "Music Brawl" },
+};
+static int g_arenaMusic = 0;
+static int g_challengeMusicResolved = -1;
+static bool g_challengeMusicStarted = false;
+static bool g_challengeMusicPending = false;
+
+static int ChallengeMusicIndexForRun() {
+    if (g_arenaMusic == 1) {
+        if (g_challengeMusicResolved < 2 ||
+            g_challengeMusicResolved >= (int)_countof(CHALLENGE_MUSIC)) {
+            static DWORD randomState = 0;
+            if (!randomState) {
+                randomState = GetTickCount() ^ GetCurrentThreadId() ^ (DWORD)(size_t)&randomState;
+                if (!randomState) randomState = 0xA341316Cu;
+            }
+            randomState ^= randomState << 13;
+            randomState ^= randomState >> 17;
+            randomState ^= randomState << 5;
+            g_challengeMusicResolved = 2 +
+                (int)(randomState % (_countof(CHALLENGE_MUSIC) - 2));
+        }
+        return g_challengeMusicResolved;
+    }
+    return g_arenaMusic;
+}
+
+// Called only from the two interpreter call sites for the script command
+// setMusic(), keeping generic sample/SFX playback outside this feature.
+static void __fastcall HookChallengeSetMusic(void* manager, void*, const char* cue) {
+    const bool arena = g_challengeSession &&
+        TrackIndexOf((const char*)G_CURRENT_LEVEL) >= 0;
+    if (!arena) {
+        ((void (__thiscall*)(void*, const char*))0x62A140)(manager, cue);
+        return;
+    }
+    if (!cue) {
+        g_challengeMusicResolved = -1;
+        g_challengeMusicStarted = false;
+        g_challengeMusicPending = g_arenaMusic > 0 &&
+            !_strnicmp(LevelBasename((const char*)G_CURRENT_LEVEL), "chb_hor_", 8);
+        ((void (__thiscall*)(void*, const char*))0x62A140)(manager, NULL);
+        return;
+    }
+    if (g_arenaMusic > 0 && g_arenaMusic < (int)_countof(CHALLENGE_MUSIC)) {
+        cue = CHALLENGE_MUSIC[ChallengeMusicIndexForRun()].cue;
+        g_challengeMusicStarted = true;
+        g_challengeMusicPending = false;
+    }
+    ((void (__thiscall*)(void*, const char*))0x62A140)(manager, cue);
+}
+
 static int __cdecl FinishStandaloneSession() {
     if (!g_challengeSession) return 0;
     const char* current = (const char*)0x5E33258;
@@ -985,11 +1062,11 @@ static const ModLoc MODL[] = {
  {"Arsenal Ammo Full", {"Ammo full",0,0,"Munici\xF3n al m\xE1ximo",0,0,0}},
  {"Arsenal Right Hand", {"R",0,0,"D",0,0,0}},
  {"Arsenal Left Hand", {"L",0,0,"I",0,0,0}},
- {"Arsenal Wheel Controls", {"R3/RS: equip right   L3/LS: equip left   (hold: drop)",0,0,"R3/RS: equipar derecha   L3/LS: equipar izquierda   (mantener: tirar)",0,0,0}},
+ {"Arsenal Wheel Controls", {"R3/RS: right   L3/LS: left   Tap: equip/stow   Hold: drop selection",0,0,"R3/RS: derecha   L3/LS: izquierda   Toque: equipar/guardar   Mantener: tirar",0,0,0}},
  {"Arsenal Wheel Keyboard", {"Right: F9   Left: F6   (hold: drop)",0,0,"Derecha: F9   Izquierda: F6   (mantener: tirar)",0,0,0}},
  {"Arsenal Empty", {"Out of ammunition",0,0,"Sin munici\xF3n",0,0,0}},
  {"Style and Combo", {"Style and Combo","Style et combo","Stile e combo","Estilo y combo","Stil und Kombo",0,"\xD1\xF2\xE8\xEB\xFC \xE8 \xEA\xEE\xEC\xE1\xEE"}},
- {"Challenge Mode", {"Challenge Mode","Mode d\xE9""fi","Modalit\xE0 sfida","Modo desaf\xEDo","Herausforderung",0,"\xD0\xE5\xE6\xE8\xEC \xE8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE9"}},
+ {"Challenge Mode", {"Challenge Mode","Mode D\xE9""fi","Modalit\xE0 Sfida","Modo Desaf\xEDo","Herausforderung",0,"\xD0\xE5\xE6\xE8\xEC \xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE9"}},
  {"Back to Main Menu", {"Back to Main Menu","Retour au menu principal","Torna al menu principale","Volver al men\xFA principal","Zur\xFC""ck zum Hauptmen\xFC",0,"\xCD\xE0\xE7\xE0\xE4 \xE2 \xE3\xEB\xE0\xE2\xED\xEE\xE5 \xEC\xE5\xED\xFE"}},
  {"Best Time", {"Best Time","Meilleur temps","Miglior tempo","Mejor tiempo","Bestzeit",0,"\xCB\xF3\xF7\xF8\xE5\xE5 \xE2\xF0\xE5\xEC\xFF"}},
  {"Time", {"Time","Temps","Tempo","Tiempo","Zeit",0,"\xC2\xF0\xE5\xEC\xFF"}},
@@ -1009,6 +1086,24 @@ static const ModLoc MODL[] = {
  {"Kills", {"Kills","Victimes","Uccisioni","Bajas","Absch\xFCsse",0,"\xD3\xE1\xE8\xE9\xF1\xF2\xE2"}},
  {"Challenge Completed", {"Challenge Completed","D\xE9""fi termin\xE9","Sfida completata","Desaf\xEDo completado","Herausforderung gemeistert",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5 \xEF\xF0\xEE\xE9\xE4\xE5\xED\xEE"}},
  {"Enemies", {"Enemies","Ennemis","Nemici","Enemigos","Gegner",0,"\xC2\xF0\xE0\xE3\xE8"}},
+ {"Enemies to defeat", {"Enemies to defeat","Ennemis \xE0 vaincre","Nemici da sconfiggere","Enemigos a derrotar","Zu besiegende Gegner",0,"\xC2\xF0\xE0\xE3\xE8 \xED\xE0 \xF3\xED\xE8\xF7\xF2\xEE\xE6\xE5\xED\xE8\xE5"}},
+ {"Arena Music", {"Arena Music","Musique d'ar\xE8ne","Musica dell'arena","M\xFAsica de la arena","Arenamusik",0,"\xCC\xF3\xE7\xFB\xEA\xE0 \xE0\xF0\xE5\xED\xFB"}},
+ {"Music Bar", {"Meatpacking Bar","Bar de Meatpacking","Bar di Meatpacking","Bar de Meatpacking","Meatpacking-Bar",0,"\xC1\xE0\xF0 \xEC\xFF\xF1\xEE\xEA\xEE\xEC\xE1\xE8\xED\xE0\xF2\xE0"}},
+ {"Music Boss II", {"Boss Battle II","Boss II","Boss II","Jefe II","Bosskampf II",0,"\xC1\xE8\xF2\xE2\xE0 \xF1 \xE1\xEE\xF1\xF1\xEE\xEC II"}},
+ {"Music Boss III", {"Boss Battle III","Boss III","Boss III","Jefe III","Bosskampf III",0,"\xC1\xE8\xF2\xE2\xE0 \xF1 \xE1\xEE\xF1\xF1\xEE\xEC III"}},
+ {"Music Club", {"Club Track","Musique du club","Musica del club","M\xFAsica del club","Clubmusik",0,"\xCA\xEB\xF3\xE1\xED\xE0\xFF \xEC\xF3\xE7\xFB\xEA\xE0"}},
+ {"Music Ephemera", {"Ephemera Theme","Th\xE8me d'Ephemera","Tema di Ephemera","Tema de Ephemera","Ephemera-Thema",0,"\xD2\xE5\xEC\xE0 \xDD\xF4\xE5\xEC\xE5\xF0\xFB"}},
+ {"Music Ferril", {"Ferril Theme","Th\xE8me de Ferril","Tema di Ferril","Tema de Ferril","Ferril-Thema",0,"\xD2\xE5\xEC\xE0 \xD4\xE5\xF0\xF0\xE8\xEB"}},
+ {"Music Ferril Intro", {"Ferril Intro","Intro de Ferril","Intro di Ferril","Intro de Ferril","Ferril-Intro",0,"\xC2\xF1\xF2\xF3\xEF\xEB\xE5\xED\xE8\xE5 \xD4\xE5\xF0\xF0\xE8\xEB"}},
+ {"Music Kagan", {"Kagan Theme","Th\xE8me de Kagan","Tema di Kagan","Tema de Kagan","Kagan-Thema",0,"\xD2\xE5\xEC\xE0 \xCA\xE0\xE3\xE0\xED\xE0"}},
+ {"Music Slezz", {"Slezz Theme","Th\xE8me de Slezz","Tema di Slezz","Tema de Slezz","Slezz-Thema",0,"\xD2\xE5\xEC\xE0 \xD1\xEB\xE5\xE7\xE7"}},
+ {"Music Wave I", {"Wave Combat I","Combat I","Combattimento I","Combate I","Kampf I",0,"\xC1\xEE\xE5\xE2\xE0\xFF \xF2\xE5\xEC\xE0 I"}},
+ {"Music Wave II", {"Wave Combat II","Combat II","Combattimento II","Combate II","Kampf II",0,"\xC1\xEE\xE5\xE2\xE0\xFF \xF2\xE5\xEC\xE0 II"}},
+ {"Music Wave III", {"Wave Combat III","Combat III","Combattimento III","Combate III","Kampf III",0,"\xC1\xEE\xE5\xE2\xE0\xFF \xF2\xE5\xEC\xE0 III"}},
+ {"Music Wave IV", {"Wave Combat IV","Combat IV","Combattimento IV","Combate IV","Kampf IV",0,"\xC1\xEE\xE5\xE2\xE0\xFF \xF2\xE5\xEC\xE0 IV"}},
+ {"Music Wave V", {"Wave Combat V","Combat V","Combattimento V","Combate V","Kampf V",0,"\xC1\xEE\xE5\xE2\xE0\xFF \xF2\xE5\xEC\xE0 V"}},
+ {"Music Wave VI", {"Wave Combat VI","Combat VI","Combattimento VI","Combate VI","Kampf VI",0,"\xC1\xEE\xE5\xE2\xE0\xFF \xF2\xE5\xEC\xE0 VI"}},
+ {"Music Brawl", {"Brawl","Brawl","Brawl","Brawl","Brawl",0,"Brawl"}},
  {"Mod Guns", {"Guns","Armes \xE0 feu","Pistole","Pistolas","Schusswaffen",0,"\xCF\xE8\xF1\xF2\xEE\xEB\xE5\xF2\xFB"}},
  {"All Weapons", {"All Weapons","Toutes les armes","Tutte le armi","Todas las armas","Alle Waffen",0,"\xC2\xF1\xE5 \xEE\xF0\xF3\xE6\xE8\xFF"}},
  {"Expanded", {"Expanded","\xC9tendu","Esteso","Expandido","Erweitert",0,"\xD0\xE0\xF1\xE8\xE8\xF0\xE5\xED\xED\xFB\xE9"}},
@@ -1036,6 +1131,7 @@ static const ModLoc MODL[] = {
  {"Ballroom Guest", {"Ballroom Guest","Invit\xE9""e du bal","Invitata al ballo","Invitada del baile","Ballgast",0,"\xC3\xEE\xF1\xF2\xFC\xFF \xE1\xE0\xEB\xE0"}},
  {"Zerenski Assassin", {"Zerenski Assassin","Tueuse de Zerenski","Sicaria di Zerenski","Sicaria de Zerenski","Zerenskis Attent\xE4terin",0,"\xD3\xE1\xE8\xE9\xF6\xE0 \xC7\xE5\xF0\xE5\xED\xF1\xEA\xE8"}},
  {"Default", {"Default","Par d\xE9""faut","Predefinito","Por defecto","Standard",0,"\xCF\xEE \xF3\xEC\xEE\xEB\xF7\xE0\xED\xE8\xFE"}},
+ {"Random", {"Random","Al\xE9""atoire","Casuale","Aleatoria","Zuf\xE4llig",0,"\xD1\xEB\xF3\xF7\xE0\xE9\xED\xEE"}},
  {"Dhampir (Female)", {"Dhampir (Female)","Dhampir (Femelle)","Dhampir (Femmina)","Dhampir (Mujer)","Dhampir (Weiblich)",0,"\xC4\xE0\xEC\xEF\xE8\xF0 (\xE6\xE5\xED\xF1\xEA\xE8\xE9)"}},
  {"Dhampir (Male)", {"Dhampir (Male)","Dhampir (M\xE2le)","Dhampir (Maschio)","Dhampir (Hombre)","Dhampir (M\xE4nnlich)",0,"\xC4\xE0\xEC\xEF\xE8\xF0 (\xEC\xF3\xE6\xF1\xEA\xEE\xE9)"}},
  {"Ephemera", {"Ephemera","Ephemera","Ephemera","Ephemera","Ephemera",0,"\xDD\xF4\xE5\xEC\xE5\xF0\xE0"}},
@@ -1043,6 +1139,7 @@ static const ModLoc MODL[] = {
  {"Kagan", {"Kagan","Kagan","Kagan","Kagan","Kagan",0,"\xCA\xE0\xE3\xE0\xED"}},
  {"Ninja (Female)", {"Ninja (Female)","Ninja (Femelle)","Ninja (Femmina)","Ninja (Mujer)","Ninja (Weiblich)",0,"\xCD\xE8\xED\xE4\xE7\xFF (\xE6\xE5\xED\xF1\xEA\xE0\xFF)"}},
  {"Ninja (Male)", {"Ninja (Male)","Ninja (M\xE2le)","Ninja (Maschio)","Ninja (Hombre)","Ninja (M\xE4nnlich)",0,"\xCD\xE8\xED\xE4\xE7\xFF (\xEC\xF3\xE6\xF1\xEA\xEE\xE9)"}},
+ {"Standard PS2", {"Standard (PS2)","Standard (PS2)","Standard (PS2)","Est\xE1ndar (PS2)","Standard (PS2)",0,"\xD1\xF2\xE0\xED\xE4\xE0\xF0\xF2 (PS2)"}},
 };
 // Language id of the loaded msglist (1=EN 2=FR 3=IT 4=ES 5=DE 6=JA 7=RU),
 // deduced from the stock key "Enemies" so it always matches the real table.
@@ -1173,6 +1270,9 @@ static int ChallengeBarsRank(int bars) {
 }
 
 static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
+    g_challengeMusicResolved = -1;
+    g_challengeMusicStarted = false;
+    g_challengeMusicPending = false;
     ClearConventionalArsenal(true);
     __try { UpdateBloodGunAmmoPool(false); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -1629,6 +1729,16 @@ static void __cdecl HudTick() {
     if (!IsStandaloneChallengeLevel(lvl)) return;
     if (menuOpen) return;
     if (!gso) return;
+    if (g_arenaMusic > 0 && g_challengeMusicPending &&
+        !_strnicmp(LevelBasename(lvl), "chb_hor_", 8)) {
+        void* manager = *(void**)0x7C6308;
+        if (manager) {
+            const char* cue = CHALLENGE_MUSIC[ChallengeMusicIndexForRun()].cue;
+            ((void (__thiscall*)(void*, const char*))0x62A140)(manager, cue);
+            g_challengeMusicStarted = true;
+            g_challengeMusicPending = false;
+        }
+    }
     ChallengeResultsBlockPause((const BYTE*)gso);
     if (g_trigTrace) {
         static DWORD s_lastDump = 0;
@@ -1831,7 +1941,7 @@ static void __cdecl OnMenuBuilt() {
         break;
     case MENU_MAIN: {
         g_characterTrack = -1;
-        AddMenuItem(ModLocalize("Challenge Mode"), AC_CHALLENGE_MENU, 0);
+        AddMenuItem(ModLocalize("Challenge Mode", false), AC_CHALLENGE_MENU, 0);
         // mover nuestro item ANTES de "Extras": items [NG,Load,Opt,Ext,Quit,CH]
         // -> shift [n-3..n-2] (Extras,Quit) una posicion abajo, CH a n-3
         {
@@ -1990,9 +2100,15 @@ static void BuildChallengeMenu() {
     }
     AddMenuItem(ChallengeHeader(lbl, "Challenge Setting"), AC_HEADER, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %d",
-              ModLocalize("Enemies"), COUNTS[g_countSel]);
+              ModLocalize("Enemies to defeat"), COUNTS[g_countSel]);
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_COUNT_CYCLE, 0);
+    _snprintf(lbl, sizeof lbl - 1, "%s: %s",
+              ModLocalize("Arena Music"),
+              ModLocalize(CHALLENGE_MUSIC[g_arenaMusic].label ?
+                          CHALLENGE_MUSIC[g_arenaMusic].label : "Default"));
+    lbl[sizeof lbl - 1] = 0;
+    AddMenuItem(lbl, AC_ARENA_MUSIC_CYCLE, 0);
     AddMenuItem(ChallengeHeader(lbl, "Choose your arena", -1), AC_HEADER, 0);
     // Time first, then style. When they come from different runs, show the
     // paired result in parentheses next to each independent record.
@@ -2096,6 +2212,15 @@ static int __cdecl DispatchOurs(int action) {
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
+    if (action == AC_ARENA_MUSIC_CYCLE) {
+        g_arenaMusic = (g_arenaMusic + 1) % _countof(CHALLENGE_MUSIC);
+        g_challengeMusicResolved = -1;
+        g_challengeMusicStarted = false;
+        g_challengeMusicPending = false;
+        InterlockedExchange(&g_chalDirty, 1);
+        *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
     if (action == AC_GUNS_CYCLE) {
         if (!ChallengeCharacterHasGuns(SelectedChallengeCharacter())) return 0;
         g_guns ^= 1;
@@ -2153,6 +2278,9 @@ static int __cdecl DispatchOurs(int action) {
     }
     if (!lvl) return -1;
     g_challengeSession = IsStandaloneChallengeLevel(lvl);
+    g_challengeMusicResolved = -1;
+    g_challengeMusicStarted = false;
+    g_challengeMusicPending = false;
     // 0x5EF4948 is the picked-level buffer: the state machine (0x569990)
     // stricmp()s it against the chapter name [0x7C2280] and then passes it
     // straight to 0x4F9570 on BOTH branches. 0x706B84 turned out to be a
@@ -3074,6 +3202,21 @@ static void LoadConfig() {
                                           ".\\br2mod.ini") ? 1 : 0;
         g_bars = GetPrivateProfileIntA("Challenge", "maxBars", 0,
                                        ".\\br2mod.ini") == 1 ? BarsMaximum : BarsBase;
+        g_arenaMusic = GetPrivateProfileIntA("Challenge", "arenaMusic", 0,
+                                             ".\\br2mod.ini");
+        const int musicVersion = GetPrivateProfileIntA("Challenge", "arenaMusicVersion", 1,
+                                                       ".\\br2mod.ini");
+        // Version 1 stored the native soundtrack at zero and songs at 1..N.
+        // Random now occupies index 1, so preserve the user's previous song.
+        if (musicVersion < 2 && g_arenaMusic > 0) ++g_arenaMusic;
+        if (g_arenaMusic < 0 || g_arenaMusic >= (int)_countof(CHALLENGE_MUSIC))
+            g_arenaMusic = 0;
+        if (musicVersion < 2) {
+            char migratedMusic[8];
+            sprintf(migratedMusic, "%d", g_arenaMusic);
+            WritePrivateProfileStringA("Challenge", "arenaMusic", migratedMusic, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "arenaMusicVersion", "2", ".\\br2mod.ini");
+        }
     }
 }
 
@@ -3096,10 +3239,9 @@ static void InstallConventionalArsenal() {
         {0x507FF0, "\x56\x8B\xF1\x8B\x06\x8B\x90\x00\x01\x00\x00", 11, DrawConventionalGun, false},
         {0x5098C6, "\xE8\x75\xE0\xFF\xFF", 5, OnConventionalGunDestroyed, true},
         {0x58461D, "\xE8\xCE\x8F\xFF\xFF", 5, DrawBloodGunModel, true},
+        {0x553051, "\xE8\x4A\xE1\x11\x00", 5, UpdateArsenalWeaponPose, true},
         {0x5874D7, "\xE8\xD4\xEE\xFF\xFF", 5, FireBloodGunOrSuppress, true},
         {0x67110C, "\xE8\x9F\x52\xF1\xFF", 5, FireBloodGunOrSuppress, true},
-        {0x6712D3, "\xE8\x98\xCC\xFF\xFF", 5, UpdateConventionalArm, true},
-        {0x6712E8, "\xE8\x83\xCC\xFF\xFF", 5, UpdateConventionalArm, true},
         {0x67116C, "\xE8\x3F\x52\xF1\xFF", 5, FireBloodGunOrSuppress, true},
         {0x67330F, "\xE8\x9C\x30\xF1\xFF", 5, FireBloodGunOrSuppress, true},
         {0x673CC1, "\xE8\xEA\x26\xF1\xFF", 5, FireBloodGunOrSuppress, true},
@@ -3119,6 +3261,7 @@ static void InstallConventionalArsenal() {
         const DWORD target = *(const DWORD*)(site.address + 1) + (site.call ? site.address + 5 : 0);
         if (target != (DWORD)site.target) return;
     }
+    InitArsenalPoseTrace();
     g_arsenalReady = true;
 }
 
@@ -3204,6 +3347,8 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchCallChecked(0x4A219B,"\xE8\xF0\x61\x11\x00",5,HookCombatFxStart);
     // Both launch and native restart enter this level loop after loading Rayne.
     PatchCallChecked(0x4F9026,"\xE8\x15\xC6\xFF\xFF",5,HookInitChallengeRun);
+    PatchCallChecked(0x4D0CA0,"\xE8\x9B\x94\x15\x00",5,HookChallengeSetMusic);
+    PatchCallChecked(0x4D0CEE,"\xE8\x4D\x94\x15\x00",5,HookChallengeSetMusic);
     PatchCallChecked(0x55213B,"\xE8\x00\x39\xF8\xFF",5,HookChallengeBarsRank); // health cap
     PatchCallChecked(0x55215E,"\xE8\xDD\x38\xF8\xFF",5,HookChallengeBarsRank); // rage cap
     PatchCallChecked(0x592142,"\xE8\xF9\x38\xF4\xFF",5,HookChallengeBarsRank); // HUD length
@@ -3323,6 +3468,10 @@ static DWORD WINAPI Worker(LPVOID) {
                                        g_allGuns ? "1" : "0", ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "maxBars",
                                        g_bars == BarsMaximum ? "1" : "0", ".\\br2mod.ini");
+            char music[8];
+            sprintf(music, "%d", g_arenaMusic);
+            WritePrivateProfileStringA("Challenge", "arenaMusic", music, ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "arenaMusicVersion", "2", ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "character",
                                        ChallengeCharacterName((ChallengeCharacter)g_character), ".\\br2mod.ini");
         }
