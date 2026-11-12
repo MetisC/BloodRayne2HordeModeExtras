@@ -15,16 +15,17 @@ from pathlib import Path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 GENERATED = (
-    ["a1_mansion_part1_battle_%s" % n for n in
-     ("100", "250", "15g", "25g", "50g", "100g", "250g")] +
-    ["chb_hor_%s" % n for n in
-     ("15", "25", "50", "100", "250",
-      "15g", "25g", "50g", "100g", "250g")] +
+    ["a1_mansion_part1_battle_%s" % n for n in ("100", "250")] +
+    ["a1_mansion_part1_battle_%d%s" % (count, suffix)
+     for suffix in ("g", "a") for count in (15, 25, 50, 100, 250)] +
+    ["chb_hor_%d%s" % (count, suffix)
+     for suffix in ("", "g", "a") for count in (15, 25, 50, 100, 250)] +
     ["%s_%s" % (arena, count) for arena in
      ("chb_fireplace", "chb_bar", "chb_meatpacking_arena", "chb_insect_plaza",
       "chb_mansion_roof", "chb_shroud_roof", "chb_woodchipper")
      for count in ("15", "25", "50", "100", "250",
-                   "15g", "25g", "50g", "100g", "250g")]
+                   "15g", "25g", "50g", "100g", "250g",
+                   "15a", "25a", "50a", "100a", "250a")]
 )
 RETITLED = ["A1_MANSION_PART1_BATTLE_%s" % n for n in ("EASY", "NORMAL", "HARD")]
 SCENE    = ["menu_level", "HUB5"]
@@ -83,6 +84,7 @@ INSTALL
      - br2mod_combat.ini
      - world\\  (whole folder)
      - data\\ and models\\  (challenge characters, equipment and appearances)
+     - art\\  (Mora textures)
      - animations\\  (challenge character moves)
 2. If you already have a dinput8.dll (another proxy mod), back it up
    first - only one dinput8 proxy can be loaded.
@@ -239,6 +241,10 @@ def main():
     if not appearance_files:
         sys.exit("No appearance assets found in ModOutfits")
     assets.extend(dict.fromkeys(name.replace("\\\\", "/") for name in appearance_files))
+    assets.extend(f"art/{name}" for name in (
+        "MORA.TEX", "MORA_HAIR.TEX", "MORA_BUMP_BUMPMAP.TEX",
+        "MORA_SPEC_GLOSSMAP.TEX", "RAYNE_PS2.TEX",
+        "RAYNE_PS2_BUMPMAP.TEX", "RAYNE_PS2_GLOSSMAP.TEX"))
     for asset in assets:
         src = os.path.join(game, asset)
         if not os.path.isfile(src):

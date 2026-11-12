@@ -303,10 +303,19 @@ def main():
                 if guns:
                     if not has_guns:
                         level = make_modes.inject_guns(level, template)
-                        level, _ = re.subn(r'^(\t?CMultigun +)5 *$', r'\g<1>6',
-                                           level, count=1, flags=re.M)
                     gun_names = rayne_guns(level)
                     assert len(gun_names) == 2, (cfg["lvl"], gun_names)
+                    # Campaign rooms can already contain their native pair
+                    # of CMultiguns. They still need the v6 schema whenever
+                    # the serialized multiGunType field is present; only
+                    # bumping newly injected actors left those rooms at v5.
+                    if re.search(r'^\t0\s*// multiGunType', level, re.M):
+                        version = re.search(r'^(\t?CMultigun +)(\d+) *\r?$',
+                                            level, re.M)
+                        assert version and int(version[2]) in (5, 6), \
+                            (cfg["lvl"], version.group(0) if version else None)
+                        if int(version[2]) == 5:
+                            level = level[:version.start(2)] + "6" + level[version.end(2):]
                     level = position_guns(level, gun_names, hero_pos)
                     weapon_names += gun_names
                 elif has_guns:
