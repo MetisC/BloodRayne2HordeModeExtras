@@ -198,13 +198,15 @@ const CombatAnimationEvent* __fastcall HookCombatAnimationStep(BYTE* controller,
         (isRayne || actor == g_hitstop.target) && HitstopActive(GetTickCount());
     const bool feedActor = isRayne && g_enhanced.feedExecutionEnabled;
     const float escapeRate = isRayne ? FeedEscapeAnimationRate(rayne) : 1.0f;
-    if (!hitstopActor && !feedActor && escapeRate == 1.0f) return step();
+    const float harpoonRate = isRayne ? HarpoonAnimationRate(rayne) : 1.0f;
+    if (!hitstopActor && !feedActor && escapeRate == 1.0f && harpoonRate == 1.0f) return step();
 
     const int state = *(const int*)(rayne + 0x17C);
     const auto* cue = feedActor ? FeedCueForState(state) : NULL;
     const unsigned bit = isRayne ? 1 : 2;
     const bool alreadyScaled = (g_hitstop.sampled & bit) != 0;
-    const float rate = escapeRate * (hitstopActor && !alreadyScaled ? HitstopRateFor(isRayne) : 1.0f);
+    const float rate = escapeRate * harpoonRate *
+        (hitstopActor && !alreadyScaled ? HitstopRateFor(isRayne) : 1.0f);
     const float incoming = *seconds;
     const float beforeFrame = *(const float*)(controller + 0x28);
     if (rate != 1.0f) *seconds *= rate;

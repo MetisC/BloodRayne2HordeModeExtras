@@ -85,10 +85,15 @@ void DamageShowcase();
 void ResetCombatCinematic();
 void ResetFeedEscape();
 float FeedEscapeAnimationRate(const BYTE* rayne);
+float HarpoonAnimationRate(const BYTE* rayne);
+BYTE* CombatCharacter(BYTE* actor);
 
 #include "feed_execution.inl"
+#include "combat_extras.inl"
 
 void ResetCombatEffects() {
+    ResetHarpoonPull();
+    ResetDiveKick();
     ResetShowcase();
     ResetFeedExecution();
     ResetFeedEscape();
@@ -113,6 +118,8 @@ void ResetCombatEffects() {
 
 void TickCombat(BYTE* rayne, DWORD now, float gameDeltaMs) {
     TickShowcase(rayne, now, gameDeltaMs);
+    TickHarpoonPull(rayne, now, gameDeltaMs);
+    TickDiveKick(rayne);
     // Only skip the animation fallback when this update used the scaled actor delta.
     g_hitstop.sampled = 0;
 #ifdef BR2_COMBAT_TEST
@@ -129,9 +136,11 @@ void TickCombat(BYTE* rayne, DWORD now, float gameDeltaMs) {
     // Store only a new press during a confirmed pull. Feed it to the native
     // input handler on return to a controllable state, which chooses the move.
     const auto target = *(BYTE**)(rayne + 0x8374);
+    const bool standingPull = g_harpoonPull.phase != PullIdle;
+    if (standingPull) g_harpoonBufferedButton = 0;
     for (unsigned i = 0; i < _countof(AttackButtons); ++i) {
         const bool held = *(int*)(rayne + AttackButtons[i]) == 1;
-        if (g_enhanced.harpoonBufferEnabled && g_harpoonTarget && target == g_harpoonTarget &&
+        if (!standingPull && g_enhanced.harpoonBufferEnabled && g_harpoonTarget && target == g_harpoonTarget &&
             held && !g_harpoonHeld[i]) {
             g_harpoonBufferedAt = now;
             g_harpoonBufferedButton = AttackButtons[i];
@@ -301,6 +310,7 @@ void __cdecl ConfirmRayneDamage(BYTE* rayne, const BYTE* hit, float damage) {
     if (g_enhanced.comboBreakOnDamage) g_comboHits = 0;
     FeedEscapeDamageApplied(rayne, hit);
     DamageShowcase();
+    CancelHarpoonFollowup();
     g_harpoonBufferedButton = 0;
     const DWORD now = GetTickCount();
     ConfirmReceivedHitstop(rayne, hit, now);

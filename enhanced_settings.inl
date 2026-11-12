@@ -77,6 +77,11 @@
     X(float, comboY, 0.40f, 0.10f, 0.85f) \
     X(int, recoveryEnabled, 1, 0, 1) \
     X(int, harpoonBufferEnabled, 1, 0, 1) \
+    X(int, harpoonPullExecEnabled, 1, 0, 1) \
+    X(int, diveKickEnabled, 1, 0, 1) \
+    X(float, diveKickRadius, 3.0f, 0.5f, 10.0f) \
+    X(float, diveKickDamage, 20.0f, 0.0f, 500.0f) \
+    X(int, diveKickSeverity, 2, 0, 9) \
     X(int, finisherEnabled, 1, 0, 1) \
     X(int, finisherCircle, 1, 0, 1) \
     X(int, finisherFx, 1, 0, 1) \

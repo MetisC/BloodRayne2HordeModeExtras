@@ -1699,6 +1699,68 @@ static void FeedYawPinTick() {
     __except (EXCEPTION_EXECUTE_HANDLER) { g_pinVictim = 0; g_pinActive = 0; }
 }
 
+// ---- anim-state diagnostic: [Diagnostics] stateLog=1 -------------------------
+// Appends one line per player anim/move/harpoon change to br2mod_state.log so
+// dormant states (harpoon pull/yank, dive kick) can be mapped by observation.
+static int g_stateLog = -1;
+namespace {
+static void TraceHarpoonFollowup(const char* decision, int playerState, int victimState, float distance) {
+    if (g_stateLog != 1) return;
+    FILE* fp = fopen("br2mod_state.log", "a");
+    if (!fp) return;
+    fprintf(fp, "%8lu  harpoon-followup=%s player=%03x victim=%03x distance=%.2f\n",
+            GetTickCount(), decision, playerState, victimState, distance);
+    fclose(fp);
+}
+}
+static int g_slState = -2, g_slMove = -2, g_slQueued = -2, g_slHarpoon = -2;
+static DWORD g_slTarget;
+static int g_slButtons[16];
+static void StateDiagTick() {
+    if (g_stateLog < 0)
+        g_stateLog = GetPrivateProfileIntA("Diagnostics", "stateLog", 0,
+                                           ".\\br2mod.ini");
+    if (!g_stateLog) return;
+    DWORD rayne;
+    __try { rayne = *(DWORD*)0x61276EC; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!rayne) return;
+    int state, move, queued, harpoon; DWORD target; float frame;
+    int buttons[16];
+    __try {
+        state   = *(int*)(rayne + 0x17C);
+        frame   = *(float*)(rayne + 0x180);
+        move    = *(int*)(rayne + 0x8350);
+        queued  = *(int*)(rayne + 0x8354);
+        harpoon = *(int*)(rayne + 0x836C);
+        target  = *(DWORD*)(rayne + 0x8374);
+        memcpy(buttons, (const void*)(rayne + 0x3A60), sizeof buttons);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    // Button-bank deltas are logged too: the hooked-harpoon press may not
+    // coincide with any state change, which is exactly what we're tracing.
+    bool btnChanged = memcmp(buttons, g_slButtons, sizeof buttons) != 0;
+    if (state == g_slState && move == g_slMove && queued == g_slQueued &&
+        harpoon == g_slHarpoon && target == g_slTarget && !btnChanged) return;
+    FILE* fp = fopen("br2mod_state.log", "a");
+    if (!fp) { g_slState = state; g_slMove = move; g_slQueued = queued;
+        g_slHarpoon = harpoon; g_slTarget = target;
+        memcpy(g_slButtons, buttons, sizeof buttons); return; }
+    fprintf(fp, "%8lu  state=%03x move=%02x queued=%02x harpoon=%d target=%08x frame=%.1f",
+            GetTickCount(), state, move, queued, harpoon, target, frame);
+    if (btnChanged) {
+        fprintf(fp, "  btn:");
+        for (int i = 0; i < 16; ++i)
+            if (buttons[i] != g_slButtons[i])
+                fprintf(fp, " %04x=%d->%d", 0x3A60 + i * 4, g_slButtons[i], buttons[i]);
+    }
+    fputc('\n', fp);
+    fclose(fp);
+    g_slState = state; g_slMove = move; g_slQueued = queued;
+    g_slHarpoon = harpoon; g_slTarget = target;
+    memcpy(g_slButtons, buttons, sizeof buttons);
+}
+
 // Called immediately BEFORE the native onscreen-text renderer, after scripts
 // and the normal timer update. Blank banners cannot overwrite us later in
 // the same frame. The script interpreter and the level loader stay native.
@@ -1711,6 +1773,7 @@ static void __cdecl HudTick() {
     if (g_photoBlockingMenu) return;
     TrackHudLevel();
     FeedDiagTick();
+    StateDiagTick();
     FeedYawPinTick();
     const char* lvl = (const char*)0x5E33258;
     int menuOpen = *(DWORD*)0x5EF4BF8 != 0;   // any menu open -> not in gameplay
@@ -3330,6 +3393,18 @@ static DWORD WINAPI Worker(LPVOID) {
     PatchChecked(0x669350,"\x55\x8B\xEC\xA1\x20\xCF\x7D\x00",8,HookCombatOutgoing);
     PatchChecked(0x662948,"\x89\xB3\x74\x83\x00\x00",6,HookCombatHarpoonPrimary);
     PatchChecked(0x662B4A,"\x89\xBB\x74\x83\x00\x00",6,HookCombatHarpoonSecondary);
+    PatchCallChecked(0x66158C,"\x8B\x11\x8B\x92\xB0\x00\x00\x00\x50\xFF\xD2",11,
+                     HookStandingHarpoonRelease);
+    PatchCallChecked(0x44BC45,"\xE8\xB6\x6F\xFB\xFF",5,HookHarpoonCollisionStep);
+    PatchCallChecked(0x6653C3,
+                     "\xD9\x05\x00\xDE\x6D\x00\xC7\x83\x6C\x83\x00\x00\x05\x00\x00\x00\xD9\x9B\xA4\x83\x00\x00",
+                     22,HookHarpoonYankEnd);
+    g_standingHarpoonHookInstalled = *(BYTE*)0x66158C == 0xE8 &&
+        (0x661591u + *(DWORD*)0x66158D) == (DWORD)HookStandingHarpoonRelease &&
+        *(BYTE*)0x44BC45 == 0xE8 &&
+        (0x44BC4Au + *(DWORD*)0x44BC46) == (DWORD)HookHarpoonCollisionStep &&
+        *(BYTE*)0x6653C3 == 0xE8 &&
+        (0x6653C8u + *(DWORD*)0x6653C4) == (DWORD)HookHarpoonYankEnd;
     PatchCallChecked(0x5868E4,"\xE8\x57\xCD\xF5\xFF",5,HookScatterProjectile);
     PatchCallChecked(0x586607,"\xE8\x84\xF1\xE7\xFF",5,HookGunMessageInit);
     PatchCallChecked(0x5508C0,"\xE8\x0B\xBB\xFF\xFF",5,HookDodgeBlade);
