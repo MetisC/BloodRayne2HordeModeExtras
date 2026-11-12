@@ -43,6 +43,12 @@ VARIANTS = [
     ("a1_mansion_part1_battle_50g",  "A1_MANSION_PART1_BATTLE_HARD",    None, "inject"),
     ("a1_mansion_part1_battle_100g", "A1_MANSION_PART1_BATTLE_EXTREME", 100,  "inject"),
     ("a1_mansion_part1_battle_250g", "A1_MANSION_PART1_BATTLE_EXTREME", 250,  "inject"),
+    # --- Mansion Battle: all-weapons variants (lvls[2], 18 CGun blocks) ---
+    ("a1_mansion_part1_battle_15a",  "A1_MANSION_PART1_BATTLE_EASY",    None, "allguns"),
+    ("a1_mansion_part1_battle_25a",  "A1_MANSION_PART1_BATTLE_NORMAL",  None, "allguns"),
+    ("a1_mansion_part1_battle_50a",  "A1_MANSION_PART1_BATTLE_HARD",    None, "allguns"),
+    ("a1_mansion_part1_battle_100a", "A1_MANSION_PART1_BATTLE_EXTREME", 100,  "allguns"),
+    ("a1_mansion_part1_battle_250a", "A1_MANSION_PART1_BATTLE_EXTREME", 250,  "allguns"),
     # --- Horde Mode: all variants are copies (arena start + counter fix) ---
     ("chb_hor_15",   "SPAWN_EASY",                      None, "horde_nude"),
     ("chb_hor_25",   "SPAWN_NORMAL",                    None, "horde_nude"),
@@ -54,6 +60,11 @@ VARIANTS = [
     ("chb_hor_50g",  "SPAWN_HARD",                      None, "horde_guns"),
     ("chb_hor_100g", "SPAWN_EXTREME",                   100,  "horde_guns"),
     ("chb_hor_250g", "SPAWN_EXTREME",                   None, "horde_guns"),
+    ("chb_hor_15a",  "SPAWN_EASY",                      None, "horde_allguns"),
+    ("chb_hor_25a",  "SPAWN_NORMAL",                    None, "horde_allguns"),
+    ("chb_hor_50a",  "SPAWN_HARD",                      None, "horde_allguns"),
+    ("chb_hor_100a", "SPAWN_EXTREME",                   100,  "horde_allguns"),
+    ("chb_hor_250a", "SPAWN_EXTREME",                   None, "horde_allguns"),
 ]
 
 WAVE_TRIGGERS = ["ST_Adv_Combat_Tute_Help", "SpawnTrigger_Both"]
@@ -246,9 +257,16 @@ def main():
             trigger = "ST_Adv_Combat_Tute_Help"
             lvl = make_arena.strip_arena_cinematics(lvl)
             lvl, weapon_names = make_arena.prepare_arena_player(lvl)
-            if guns == "inject":
+            if guns in ("inject", "allguns"):
                 lvl = inject_guns(lvl, tmpl)
                 weapon_names += ["Multigun0", "Multigun1"]
+                if guns == "allguns":
+                    # Ring of all 18 arsenal guns at the warp destination.
+                    wp_pos = make_arena.actor_pos(lvl, "CWayPoint", waypoint)
+                    assert wp_pos, waypoint
+                    lvl, all_names = make_arena.inject_allguns(
+                        lvl, "%g,%g,%g" % tuple(wp_pos))
+                    weapon_names += all_names
             stock = next(m[1] for m in make_arena.TRIG_BLK.finditer(lvl) if m[2] == trigger)
             desired = min(int(re.search(r'^\t(\d+)[ \t]+// desiredNumberOfActiveEnemiesInArea',
                                         stock, re.M)[1]), 4)
@@ -265,7 +283,7 @@ def main():
             arm = ["createActor(%s)" % trigger]
             raw = make_arena.build_scb(make_arena.wave_script(
                 waypoint, setup, arm, make_arena.ARENA_FINISH_FLAG, "music_wavefight2_loop.wav",
-                weapon_names, guns=guns == "inject"))
+                weapon_names, guns=guns in ("inject", "allguns")))
         else:
             raw = retitle(raw)
             if maxn:
@@ -275,6 +293,12 @@ def main():
             lvl = nude_guns(lvl)
         elif guns == "horde_guns":
             lvl = horde_setup(lvl, guns=True)
+            raw = horde_warp(raw, guns=True)
+        elif guns == "horde_allguns":
+            lvl = horde_setup(lvl, guns=True)
+            # Guns land at the arena warp point itself, so the stock hero
+            # warp needs no extra tokens for them.
+            lvl, _ = make_arena.inject_allguns(lvl, HORDE_WP)
             raw = horde_warp(raw, guns=True)
         elif guns == "horde_nude":
             lvl = horde_setup(lvl, guns=False)

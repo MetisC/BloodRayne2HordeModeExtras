@@ -102,6 +102,8 @@ static float g_new, g_mult, g_dmgIn = 1.f, g_dmgOut = 1.f, g_cost = 1.f;
 #define AC_PHOTO          0x11F
 #define AC_CHARACTER      0x120
 #define AC_EXTRA_BASE     0x121    // 0x121.. extra launches
+#define AC_ALL_GUNS_CYCLE 0x126    // all conventional weapons at arena start
+#define AC_HEADER         0x127    // section separators: selectable, no action
 #define AC_ARENA_BASE     0x131    // 0x131.. arena launches at selected count
 #define AC_SKIN_PICK_BASE 0x141    // 0x141.. skin list picks
 
@@ -135,9 +137,18 @@ static_assert(_countof(COMBAT_EFFECTS) == EffectCount && AC_EFFECT_BASE + Effect
               "Combat effect table and menu actions must match");
 static volatile LONG g_effects = (1L << EffectGunCombat) - 1;
 static volatile LONG g_effectsDirty = 0;
+// gunCombat is a three-way selector rather than a bit: Off keeps the native
+// bloodguns, Full enables the enhanced arsenal, Capacity applies only the
+// enhanced bloodgun ammo pools and leaves everything else native.
+enum GunCombatMode { GunCombatOff = 0, GunCombatFull = 1,
+                     GunCombatCapacity = 2 };
+static int g_gunCombat = GunCombatOff;
 static bool CombatEffectEnabled(CombatEffect effect) {
+    if (effect == EffectGunCombat) return g_gunCombat == GunCombatFull;
     return (g_effects & (1L << effect)) != 0;
 }
+// The shared bloodgun ammo pool runs in both non-native gun modes.
+static bool GunCapacityEnhanced() { return g_gunCombat != GunCombatOff; }
 
 // The native gun data uses ammo cost to determine how quickly its shared
 // 0..1000 blood pool is consumed. Keep the native values per CMultiGun so the
@@ -494,13 +505,14 @@ static const DWORD OUTFIT_INDEX_CALLS[] = {
 };
 
 struct Entry { const char* title; const char* lvl; };
-// Five counts per arena, guns on/off. lvls[0]=no guns, lvls[1]=guns.
+// Five counts per arena, three weapon variants:
+// lvls[0]=no guns, lvls[1]=guns, lvls[2]=all weapons (enhanced gun combat).
 // Stock levels (battle_*/spawn_*) load straight from the PODs; chb_* are
 // generated copies (count patches, multigun inject/relocate, retitled
 // scripts) produced by tools/make_modes.py and make_campaign_arenas.py.
 #define NUM_CNT 5
 static const int COUNTS[NUM_CNT] = { 15, 25, 50, 100, 250 };
-typedef struct { const char* name; const char* lvls[2][NUM_CNT]; } Arena;
+typedef struct { const char* name; const char* lvls[3][NUM_CNT]; } Arena;
 static const Arena ARENAS[] = {
     { "Mansion Battle", {{
         "a1_mansion_part1_battle_easy.lvl",
@@ -510,75 +522,99 @@ static const Arena ARENAS[] = {
         "a1_mansion_part1_battle_250.lvl" },
       { "a1_mansion_part1_battle_15g.lvl", "a1_mansion_part1_battle_25g.lvl",
         "a1_mansion_part1_battle_50g.lvl", "a1_mansion_part1_battle_100g.lvl",
-        "a1_mansion_part1_battle_250g.lvl" }} },
+        "a1_mansion_part1_battle_250g.lvl" },
+      { "a1_mansion_part1_battle_15a.lvl", "a1_mansion_part1_battle_25a.lvl",
+        "a1_mansion_part1_battle_50a.lvl", "a1_mansion_part1_battle_100a.lvl",
+        "a1_mansion_part1_battle_250a.lvl" }} },
     { "Mansion Fireplace", {{
         "chb_fireplace_15.lvl", "chb_fireplace_25.lvl", "chb_fireplace_50.lvl",
         "chb_fireplace_100.lvl", "chb_fireplace_250.lvl" },
       { "chb_fireplace_15g.lvl", "chb_fireplace_25g.lvl", "chb_fireplace_50g.lvl",
-        "chb_fireplace_100g.lvl", "chb_fireplace_250g.lvl" }} },
+        "chb_fireplace_100g.lvl", "chb_fireplace_250g.lvl" },
+      { "chb_fireplace_15a.lvl", "chb_fireplace_25a.lvl", "chb_fireplace_50a.lvl",
+        "chb_fireplace_100a.lvl", "chb_fireplace_250a.lvl" }} },
     { "Mansion Rooftop", {{
         "chb_mansion_roof_15.lvl", "chb_mansion_roof_25.lvl",
         "chb_mansion_roof_50.lvl", "chb_mansion_roof_100.lvl",
         "chb_mansion_roof_250.lvl" },
       { "chb_mansion_roof_15g.lvl", "chb_mansion_roof_25g.lvl",
         "chb_mansion_roof_50g.lvl", "chb_mansion_roof_100g.lvl",
-        "chb_mansion_roof_250g.lvl" }} },
+        "chb_mansion_roof_250g.lvl" },
+      { "chb_mansion_roof_15a.lvl", "chb_mansion_roof_25a.lvl",
+        "chb_mansion_roof_50a.lvl", "chb_mansion_roof_100a.lvl",
+        "chb_mansion_roof_250a.lvl" }} },
     { "Meatpacking Bar", {{
         "chb_bar_15.lvl", "chb_bar_25.lvl", "chb_bar_50.lvl",
         "chb_bar_100.lvl", "chb_bar_250.lvl" },
       { "chb_bar_15g.lvl", "chb_bar_25g.lvl", "chb_bar_50g.lvl",
-        "chb_bar_100g.lvl", "chb_bar_250g.lvl" }} },
+        "chb_bar_100g.lvl", "chb_bar_250g.lvl" },
+      { "chb_bar_15a.lvl", "chb_bar_25a.lvl", "chb_bar_50a.lvl",
+        "chb_bar_100a.lvl", "chb_bar_250a.lvl" }} },
     { "Meatpacking Arena", {{
         "chb_meatpacking_arena_15.lvl", "chb_meatpacking_arena_25.lvl",
         "chb_meatpacking_arena_50.lvl", "chb_meatpacking_arena_100.lvl",
         "chb_meatpacking_arena_250.lvl" },
       { "chb_meatpacking_arena_15g.lvl", "chb_meatpacking_arena_25g.lvl",
         "chb_meatpacking_arena_50g.lvl", "chb_meatpacking_arena_100g.lvl",
-        "chb_meatpacking_arena_250g.lvl" }} },
+        "chb_meatpacking_arena_250g.lvl" },
+      { "chb_meatpacking_arena_15a.lvl", "chb_meatpacking_arena_25a.lvl",
+        "chb_meatpacking_arena_50a.lvl", "chb_meatpacking_arena_100a.lvl",
+        "chb_meatpacking_arena_250a.lvl" }} },
     { "Shroud Tower Roof", {{
         "chb_shroud_roof_15.lvl", "chb_shroud_roof_25.lvl",
         "chb_shroud_roof_50.lvl", "chb_shroud_roof_100.lvl",
         "chb_shroud_roof_250.lvl" },
       { "chb_shroud_roof_15g.lvl", "chb_shroud_roof_25g.lvl",
         "chb_shroud_roof_50g.lvl", "chb_shroud_roof_100g.lvl",
-        "chb_shroud_roof_250g.lvl" }} },
+        "chb_shroud_roof_250g.lvl" },
+      { "chb_shroud_roof_15a.lvl", "chb_shroud_roof_25a.lvl",
+        "chb_shroud_roof_50a.lvl", "chb_shroud_roof_100a.lvl",
+        "chb_shroud_roof_250a.lvl" }} },
     { "Insect Plaza", {{
         "chb_insect_plaza_15.lvl", "chb_insect_plaza_25.lvl",
         "chb_insect_plaza_50.lvl", "chb_insect_plaza_100.lvl",
         "chb_insect_plaza_250.lvl" },
       { "chb_insect_plaza_15g.lvl", "chb_insect_plaza_25g.lvl",
         "chb_insect_plaza_50g.lvl", "chb_insect_plaza_100g.lvl",
-        "chb_insect_plaza_250g.lvl" }} },
+        "chb_insect_plaza_250g.lvl" },
+      { "chb_insect_plaza_15a.lvl", "chb_insect_plaza_25a.lvl",
+        "chb_insect_plaza_50a.lvl", "chb_insect_plaza_100a.lvl",
+        "chb_insect_plaza_250a.lvl" }} },
     { "Woodchipper", {{
         "chb_woodchipper_15.lvl", "chb_woodchipper_25.lvl",
         "chb_woodchipper_50.lvl", "chb_woodchipper_100.lvl",
         "chb_woodchipper_250.lvl" },
       { "chb_woodchipper_15g.lvl", "chb_woodchipper_25g.lvl",
         "chb_woodchipper_50g.lvl", "chb_woodchipper_100g.lvl",
-        "chb_woodchipper_250g.lvl" }} },
+        "chb_woodchipper_250g.lvl" },
+      { "chb_woodchipper_15a.lvl", "chb_woodchipper_25a.lvl",
+        "chb_woodchipper_50a.lvl", "chb_woodchipper_100a.lvl",
+        "chb_woodchipper_250a.lvl" }} },
     { "Mod Horde", {{
         "chb_hor_15.lvl", "chb_hor_25.lvl", "chb_hor_50.lvl",
         "chb_hor_100.lvl", "chb_hor_250.lvl" },
       { "chb_hor_15g.lvl", "chb_hor_25g.lvl", "chb_hor_50g.lvl",
-        "chb_hor_100g.lvl", "chb_hor_250g.lvl" }} },
+        "chb_hor_100g.lvl", "chb_hor_250g.lvl" },
+      { "chb_hor_15a.lvl", "chb_hor_25a.lvl", "chb_hor_50a.lvl",
+        "chb_hor_100a.lvl", "chb_hor_250a.lvl" }} },
 };
 #define NUM_ARENAS (sizeof(ARENAS)/sizeof(ARENAS[0]))
 // Flat level list for best-time bookkeeping, built once at init from
-// ARENAS x guns x counts so the tables cannot diverge.
-#define MAX_TRACKS (NUM_ARENAS * 2 * NUM_CNT)
+// ARENAS x gun variants x counts so the tables cannot diverge.
+#define MAX_TRACKS (NUM_ARENAS * 3 * NUM_CNT)
 static_assert(AC_ARENA_BASE + NUM_ARENAS <= AC_SKIN_PICK_BASE,
               "Challenge action codes overlap skin actions");
 static const char* TRACK_LVLS[MAX_TRACKS];
-static bool TRACK_HAS_GUNS[MAX_TRACKS];
+static BYTE TRACK_GUN_MODE[MAX_TRACKS];
 static int NUM_TRACKS;
 static void BuildTrackList() {
     int i, j, g;
     NUM_TRACKS = 0;
     for (i = 0; i < (int)NUM_ARENAS; ++i)
-        for (g = 0; g < 2; ++g)
+        for (g = 0; g < 3; ++g)
             for (j = 0; j < NUM_CNT; ++j)
                 if (ARENAS[i].lvls[g][j]) {
-                    TRACK_HAS_GUNS[NUM_TRACKS] = g != 0;
+                    TRACK_GUN_MODE[NUM_TRACKS] = static_cast<BYTE>(g);
                     TRACK_LVLS[NUM_TRACKS++] = ARENAS[i].lvls[g][j];
                 }
 }
@@ -597,7 +633,12 @@ static int TrackIndexOf(const char* lvl) {
 }
 static bool CurrentChallengeAllowsArsenal() {
     const int track = TrackIndexOf((const char*)G_CURRENT_LEVEL);
-    return track >= 0 && TRACK_HAS_GUNS[track];
+    return track >= 0 && TRACK_GUN_MODE[track] != 0;
+}
+
+static bool CurrentChallengeGrantsAllGuns() {
+    const int track = TrackIndexOf((const char*)G_CURRENT_LEVEL);
+    return track >= 0 && TRACK_GUN_MODE[track] == 2;
 }
 
 enum ChallengeCharacter {
@@ -937,15 +978,15 @@ static const ModLoc MODL[] = {
  {"Impact Pause", {"Impact Pause","Pause \xE0 l'impact","Pausa all'impatto","Pausa de impacto","Trefferpause",0,"\xCF\xE0\xF3\xE7\xE0 \xEF\xF0\xE8 \xF3\xE4\xE0\xF0\xE5"}},
  {"Mod Parry", {"Parry","Parade","Parata","Parry","Parade",0,"\xCF\xE0\xF0\xE8\xF0\xEE\xE2\xE0\xED\xE8\xE5"}},
  {"Dodge Offset", {"Dodge Offset","Combo apr\xE8s esquive","Combo dopo schivata","Dodge Offset","Dodge Offset",0,"\xCA\xEE\xEC\xE1\xEE \xEF\xEE\xF1\xEB\xE5 \xF3\xEA\xEB\xEE\xED\xE5\xED\xE8\xFF"}},
- {"Enhanced Gun Combat", {"Enhanced Gun Combat","Armes classiques ameliorees","Combattimento con armi classiche migliorato","Combate con armas de fuego mejorado","Verbesserter Kampf mit klassischen Waffen",0,"\xCF\xF0\xE8\xE2\xE5\xF2\xF1\xF2\xE2\xEE \xE4\xEB\xFF \xEA\xEB\xE0\xF1\xF1\xE8\xF7\xE5\xF1\xEA\xE8\xF5 \xEE\xF0\xF3\xE6\xE8\xE9"}},
+ {"Enhanced Gun Combat", {"Firearms","Armes \xE0 feu","Armi da fuoco","Armas de fuego","Feuerwaffen",0,"\xCE\xE3\xED\xE5\xF1\xF2\xF0\xE5\xEB\xFC\xED\xEE\xE5 \xEE\xF0\xF3\xE6\xE8\xE5"}},
  {"Arsenal Equipped", {"Weapon equipped",0,0,"Arma equipada",0,0,0}},
  {"Arsenal Stored", {"Weapon stored",0,0,"Arma guardada",0,0,0}},
  {"Arsenal Ammo", {"rounds",0,0,"balas",0,0,0}},
  {"Arsenal Ammo Full", {"Ammo full",0,0,"Munici\xF3n al m\xE1ximo",0,0,0}},
  {"Arsenal Right Hand", {"R",0,0,"D",0,0,0}},
  {"Arsenal Left Hand", {"L",0,0,"I",0,0,0}},
- {"Arsenal Wheel Controls", {"Equip: Triangle/Y   Stow: Square/X   Drop: R3/RS",0,0,"Equipar: Triangulo/Y   Guardar: Cuadrado/X   Tirar: R3/RS",0,0,0}},
- {"Arsenal Wheel Keyboard", {"Equip: F9   Stow: F6   Drop: F8",0,0,"Equipar: F9   Guardar: F6   Tirar: F8",0,0,0}},
+ {"Arsenal Wheel Controls", {"R3/RS: equip right   L3/LS: equip left   (hold: drop)",0,0,"R3/RS: equipar derecha   L3/LS: equipar izquierda   (mantener: tirar)",0,0,0}},
+ {"Arsenal Wheel Keyboard", {"Right: F9   Left: F6   (hold: drop)",0,0,"Derecha: F9   Izquierda: F6   (mantener: tirar)",0,0,0}},
  {"Arsenal Empty", {"Out of ammunition",0,0,"Sin munici\xF3n",0,0,0}},
  {"Style and Combo", {"Style and Combo","Style et combo","Stile e combo","Estilo y combo","Stil und Kombo",0,"\xD1\xF2\xE8\xEB\xFC \xE8 \xEA\xEE\xEC\xE1\xEE"}},
  {"Challenge Mode", {"Challenge Mode","Mode d\xE9""fi","Modalit\xE0 sfida","Modo desaf\xEDo","Herausforderung",0,"\xD0\xE5\xE6\xE8\xEC \xE8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE9"}},
@@ -969,6 +1010,13 @@ static const ModLoc MODL[] = {
  {"Challenge Completed", {"Challenge Completed","D\xE9""fi termin\xE9","Sfida completata","Desaf\xEDo completado","Herausforderung gemeistert",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5 \xEF\xF0\xEE\xE9\xE4\xE5\xED\xEE"}},
  {"Enemies", {"Enemies","Ennemis","Nemici","Enemigos","Gegner",0,"\xC2\xF0\xE0\xE3\xE8"}},
  {"Mod Guns", {"Guns","Armes \xE0 feu","Pistole","Pistolas","Schusswaffen",0,"\xCF\xE8\xF1\xF2\xEE\xEB\xE5\xF2\xFB"}},
+ {"All Weapons", {"All Weapons","Toutes les armes","Tutte le armi","Todas las armas","Alle Waffen",0,"\xC2\xF1\xE5 \xEE\xF0\xF3\xE6\xE8\xFF"}},
+ {"Expanded", {"Expanded","\xC9tendu","Esteso","Expandido","Erweitert",0,"\xD0\xE0\xF1\xE8\xE8\xF0\xE5\xED\xED\xFB\xE9"}},
+ {"Standard", {"Standard","Standard","Standard","Est\xE1ndar","Standard",0,"\xD1\xF2\xE0\xED\xE4\xE0\xF0\xF2"}},
+ {"Standard Enhanced", {"Standard Enhanced","Standard am\xE9lior\xE9","Standard migliorato","Est\xE1ndar mejorado","Standard erweitert",0,"\xD1\xF2\xE0\xED\xE4\xE0\xF0\xF2 \xF3\xEB\xF3\xF7\xF8\xE5\xED\xED\xFB\xE9"}},
+ {"Character Setting", {"Character Setting","Personnage","Personaggio","Personaje","Charakter",0,"\xCF\xE5\xF0\xF1\xEE\xED\xE0\xE6"}},
+ {"Challenge Setting", {"Challenge Setting","D\xE9""fi","Sfida","Desaf\xEDo","Herausforderung",0,"\xC8\xF1\xEF\xFB\xF2\xE0\xED\xE8\xE5"}},
+ {"Choose your arena", {"Choose your arena","Choisis ton ar\xE8ne","Scegli la tua arena","Elige tu arena","W\xE4hle deine Arena",0,"\xC2\xFB\xE1\xE5\xF0\xE8 \xE0\xF0\xE5\xED\xF3"}},
  {"Challenge Character", {"Character","Personnage","Personaggio","Personaje","Figur",0,"\xCF\xE5\xF0\xF1\xEE\xED\xE0\xE6"}},
  {"Challenge Bars", {"Health and Rage","Vie et rage","Vita e furia","Vida y furia","Leben und Wut",0,"\xC7\xE4\xEE\xF0\xEE\xE2\xFC\xE5 \xE8 \xFF\xF0\xEE\xF1\xF2\xFC"}},
  {"Challenge Bars Base", {"Base","Base","Base","Base","Basis",0,"\xC1\xE0\xE7\xE0"}},
@@ -1050,7 +1098,11 @@ static int   g_timeChal = -1;    // CHALLENGE index whose run is being timed
 static float g_runAccum;         // accumulated run seconds (game time)
 static int   g_runArmed;         // first enemy emitted -> clock counts
 static int   g_runDone;          // completion latched -> no more counting
-static int   g_doneStreak;
+static DWORD g_objectiveSampleAt;
+static DWORD g_objectiveDoneSince;
+static bool  g_objectiveDoneTiming;
+static bool  g_objectiveCached;
+static ObjectiveProgress g_objectiveCache;
 static bool  g_resultPauseLocked;
 
 static bool __cdecl ChallengeResultsBlockPause(const BYTE* game) {
@@ -1095,6 +1147,7 @@ void TickConventionalArsenal(BYTE* game);
 void ClearConventionalArsenal(bool release);
 void DrawConventionalArsenalHud(BYTE* game);
 void SuspendArsenalWheel();
+bool ArsenalWheelOpen();
 }
 
 #include "parry.inl"
@@ -1147,7 +1200,10 @@ static void __fastcall HookInitChallengeRun(void* game, void*, int flag) {
     g_runDone = 0;
     g_resultPauseLocked = false;
     g_runAccum = 0.0f;
-    g_doneStreak = 0;
+    g_objectiveSampleAt = 0;
+    g_objectiveDoneSince = 0;
+    g_objectiveDoneTiming = false;
+    g_objectiveCached = false;
     if (g_timeChal < 0) return;
 
     // Same Rayne resolver as the native level initialization at 0x4F9076.
@@ -1285,6 +1341,10 @@ static void TrackHudLevel() {
         g_hudLvl[sizeof g_hudLvl - 1] = 0;
         g_killCount = 0;
         g_hudShown[0] = 0;
+        g_objectiveSampleAt = 0;
+        g_objectiveDoneSince = 0;
+        g_objectiveDoneTiming = false;
+        g_objectiveCached = false;
         if (IsStandaloneChallengeLevel(lvl)) g_challengeSession = true;
         else if (!IsChallengeMenuBridge(lvl)) g_challengeSession = false;
     }
@@ -1545,7 +1605,7 @@ static void FeedYawPinTick() {
 static void __cdecl HudTick() {
     SampleEnhancedSettings();
     __try {
-        UpdateBloodGunAmmoPool(g_combat == CombatEnhanced && CombatEffectEnabled(EffectGunCombat));
+        UpdateBloodGunAmmoPool(g_combat == CombatEnhanced && GunCapacityEnhanced());
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (g_photoBlockingMenu) return;
@@ -1583,9 +1643,16 @@ static void __cdecl HudTick() {
             }
         }
     }
-    ObjectiveProgress progress;
-    if (!ReadObjectiveProgress(&progress))
+    // The native objective scan walks every actor and tests its class and
+    // trigger volumes. Run it at 10 Hz and reuse the result between samples.
+    const DWORD objectiveNow = GetTickCount();
+    if (!g_objectiveCached || objectiveNow - g_objectiveSampleAt >= 100) {
+        g_objectiveSampleAt = objectiveNow;
+        g_objectiveCached = ReadObjectiveProgress(&g_objectiveCache);
+    }
+    if (!g_objectiveCached)
         return; // no authoritative wave yet: do not display an estimate
+    const ObjectiveProgress& progress = g_objectiveCache;
     // Fill the HUD labels the moment a live objective exists: the early-outs
     // below (slot sanity / yield-to-script) used to run first, so a run that
     // finished while the script's own display held the slot would build its
@@ -1619,8 +1686,15 @@ static void __cdecl HudTick() {
     // Require a sustained completion (~0.75s) before owning the slot.
     bool rawDone = progress.target > 0 && progress.spawned >= progress.target
                 && progress.alive == 0;
-    g_doneStreak = rawDone ? g_doneStreak + 1 : 0;
-    bool done = g_doneStreak >= 45;
+    if (rawDone) {
+        if (!g_objectiveDoneTiming) {
+            g_objectiveDoneTiming = true;
+            g_objectiveDoneSince = objectiveNow;
+        }
+    } else {
+        g_objectiveDoneTiming = false;
+    }
+    bool done = g_objectiveDoneTiming && objectiveNow - g_objectiveDoneSince >= 750;
     if (done && g_runArmed && !g_runDone) {
         DWORD ms = (DWORD)(g_runAccum * 1000.0f);
         char tb[16];
@@ -1736,6 +1810,8 @@ static void __declspec(naked) AddMenuItem(const char* text, int action,
     }
 }
 
+static int g_allGuns = 0;       // 1 = start with all conventional weapons
+
 #include "photo_mode.inl"
 #include "conventional_arsenal.inl"
 
@@ -1833,8 +1909,14 @@ static void __cdecl OnMenuBuilt() {
         *(int*)0x5EF5640 = 2;
         for (int effect = 0; effect < EffectCount; ++effect) {
             char label[72];
+            const char* state;
+            if (effect == EffectGunCombat)
+                state = g_gunCombat == GunCombatFull ? "Expanded" :
+                        g_gunCombat == GunCombatCapacity ? "Standard Enhanced" : "Standard";
+            else
+                state = CombatEffectEnabled((CombatEffect)effect) ? "On" : "Off";
             sprintf_s(label, "%s: %s", ModLocalize(COMBAT_EFFECTS[effect].label),
-                      ModLocalize(CombatEffectEnabled((CombatEffect)effect) ? "On" : "Off"));
+                      ModLocalize(state));
             AddMenuItem(label, AC_EFFECT_BASE + effect, 0);
         }
         AddMenuItem(ModLocalize("Back"), AC_BACK, 0);
@@ -1850,10 +1932,33 @@ static int g_countSel = 1;      // COUNTS index shown on the cycler (25 default)
 static int g_guns = 0;          // 0 = blades only, 1 = bloodguns too
 static volatile LONG g_chalDirty = 0;  // [Challenge] options need flushing
 
+// ARENAS row for the current options: lvls[2] grants the full arsenal and
+// only exists when Guns + the enhanced-gun-combat effect are both live.
+// The arsenal itself only runs as Rayne, so she is the only recipient.
+static int ChallengeGunMode(ChallengeCharacter who) {
+    const int guns = ChallengeCharacterHasGuns(who) ? g_guns : 0;
+    return (who == ChallengeRayne && guns && g_allGuns &&
+            g_combat == CombatEnhanced &&
+            CombatEffectEnabled(EffectGunCombat)) ? 2 : guns;
+}
+
 static void FormatBest(DWORD best, char* tb) {
     if (best) sprintf(tb, "%u'%02u'%02u", best / 60000u,
                       (best / 1000u) % 60u, (best / 10u) % 100u);
     else strcpy(tb, "--");
+}
+
+// Section headers are labels, not options: a fixed-width rule runs after the
+// localized title and their action code is a selectable no-op. The font is
+// proportional, so longer titles get an extra pad adjustment to even out.
+static const char* ChallengeHeader(char* out, const char* key, int adjust = 0) {
+    const char* loc = ModLocalize(key);
+    int pad = 52 - (int)strlen(loc) - 1 + adjust;
+    if (pad < 4) pad = 4;
+    _snprintf(out, 71, "%s %.*s", loc, pad,
+              "----------------------------------------------------");
+    out[71] = 0;
+    return out;
 }
 
 static void BuildChallengeMenu() {
@@ -1863,25 +1968,36 @@ static void BuildChallengeMenu() {
     *(int*)G_ITEM_COUNT = 0;
     // Label buffer inside a menu item is 72 bytes: keep texts under it.
     char lbl[72], tb[16];
-    _snprintf(lbl, sizeof lbl - 1, "%s: %d",
-              ModLocalize("Enemies"), COUNTS[g_countSel]);
-    lbl[sizeof lbl - 1] = 0;
-    AddMenuItem(lbl, AC_COUNT_CYCLE, 0);
-    _snprintf(lbl, sizeof lbl - 1, "%s: %s",
-              ModLocalize("Mod Guns"),
-              ModLocalize(guns ? "Yes" : "No"));
-    lbl[sizeof lbl - 1] = 0;
-    AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
+    AddMenuItem(ChallengeHeader(lbl, "Character Setting"), AC_HEADER, 0);
     sprintf_s(lbl, "%s: %s", ModLocalize("Challenge Character", false), ChallengeCharacterLabel(who));
     AddMenuItem(lbl, AC_CHARACTER, 0);
     _snprintf(lbl, sizeof lbl - 1, "%s: %s", ModLocalize("Challenge Bars"),
               ModLocalize(g_bars == BarsMaximum ? "Challenge Bars Maximum" : "Challenge Bars Base"));
     lbl[sizeof lbl - 1] = 0;
     AddMenuItem(lbl, AC_BARS_CYCLE, 0);
+    _snprintf(lbl, sizeof lbl - 1, "%s: %s",
+              ModLocalize("Mod Guns"),
+              ModLocalize(guns ? "Yes" : "No"));
+    lbl[sizeof lbl - 1] = 0;
+    AddMenuItem(lbl, AC_GUNS_CYCLE, 0);
+    if (who == ChallengeRayne && guns && g_combat == CombatEnhanced &&
+        CombatEffectEnabled(EffectGunCombat)) {
+        _snprintf(lbl, sizeof lbl - 1, "%s: %s",
+                  ModLocalize("All Weapons"),
+                  ModLocalize(g_allGuns ? "Yes" : "No"));
+        lbl[sizeof lbl - 1] = 0;
+        AddMenuItem(lbl, AC_ALL_GUNS_CYCLE, 0);
+    }
+    AddMenuItem(ChallengeHeader(lbl, "Challenge Setting"), AC_HEADER, 0);
+    _snprintf(lbl, sizeof lbl - 1, "%s: %d",
+              ModLocalize("Enemies"), COUNTS[g_countSel]);
+    lbl[sizeof lbl - 1] = 0;
+    AddMenuItem(lbl, AC_COUNT_CYCLE, 0);
+    AddMenuItem(ChallengeHeader(lbl, "Choose your arena", -1), AC_HEADER, 0);
     // Time first, then style. When they come from different runs, show the
     // paired result in parentheses next to each independent record.
     for (i = 0; i < (int)NUM_ARENAS; ++i) {
-        int ti = TrackIndexOf(ARENAS[i].lvls[guns][g_countSel]);
+        int ti = TrackIndexOf(ARENAS[i].lvls[ChallengeGunMode(who)][g_countSel]);
         const auto records = ReadChallengeRecords(ti, g_diff, g_bars, g_combat, g_combatProfile, who);
         const char* name = ModLocalize(ARENAS[i].name);
         FormatBest(records.bestTime, tb);
@@ -1900,6 +2016,8 @@ static void BuildChallengeMenu() {
         lbl[sizeof lbl - 1] = 0;
         AddMenuItem(lbl, AC_ARENA_BASE + i, 0);
     }
+    AddMenuItem("----------------------------------------------------",
+                AC_HEADER, 0);
     AddMenuItem(ModLocalize("Back to Main Menu"), AC_BACK, 0);
 }
 
@@ -1908,6 +2026,7 @@ static void BuildChallengeMenu() {
 static int __cdecl DispatchOurs(int action) {
     Trace("ACTION code=%X",action);
     TraceGlobals("action");
+    if (action == AC_HEADER) return 0;   // section header: click does nothing
     if (action == AC_PHOTO) {
         RequestPhotoFromPause();
         return 0;
@@ -1922,9 +2041,12 @@ static int __cdecl DispatchOurs(int action) {
     if (action >= AC_EFFECT_BASE && action < AC_EFFECT_BASE + EffectCount) {
         if (g_combat == CombatEnhanced && *(int*)G_MENU_STATE == MENU_EFFECTS) {
             const LONG bit = 1L << (action - AC_EFFECT_BASE);
-            if (bit == (1L << EffectGunCombat) && g_runBars >= 0 && !g_runDone)
-                g_runCombatChanged = true;
-            InterlockedXor(&g_effects, bit);
+            if (bit == (1L << EffectGunCombat)) {
+                if (g_runBars >= 0 && !g_runDone) g_runCombatChanged = true;
+                g_gunCombat = (g_gunCombat + 1) % 3;
+            } else {
+                InterlockedXor(&g_effects, bit);
+            }
             InterlockedOr(&g_effectsDirty, bit);
             *(unsigned char*)G_MENU_REBUILD = 1;
         }
@@ -1981,6 +2103,16 @@ static int __cdecl DispatchOurs(int action) {
         *(unsigned char*)G_MENU_REBUILD = 1;
         return 0;
     }
+    if (action == AC_ALL_GUNS_CYCLE) {
+        const ChallengeCharacter who = SelectedChallengeCharacter();
+        if (who != ChallengeRayne || !g_guns || g_combat != CombatEnhanced ||
+            !CombatEffectEnabled(EffectGunCombat) || !ChallengeCharacterHasGuns(who))
+            return 0;
+        g_allGuns ^= 1;
+        InterlockedExchange(&g_chalDirty, 1);
+        *(unsigned char*)G_MENU_REBUILD = 1;
+        return 0;
+    }
     if (action == AC_CHARACTER) {
         if (*(int*)G_MENU_STATE == MENU_CHALLENGE) {
             const LONG current = g_character;
@@ -2007,7 +2139,7 @@ static int __cdecl DispatchOurs(int action) {
     i = action - AC_ARENA_BASE;
     if (i >= 0 && i < (int)NUM_ARENAS) {
         const ChallengeCharacter who = SelectedChallengeCharacter();
-        lvl = ARENAS[i].lvls[ChallengeCharacterHasGuns(who) ? g_guns : 0][g_countSel];
+        lvl = ARENAS[i].lvls[ChallengeGunMode(who)][g_countSel];
         g_activeCharacter = who;
         g_characterTrack = who != ChallengeRayne ? TrackIndexOf(lvl) : -1;
     }
@@ -2684,6 +2816,19 @@ static void __fastcall HookFerrilDamage(void* self, void*, void* ev) {
         g_ferrilFlashAt = *(float*)G_GAME_CLOCK;
 }
 
+static int __fastcall HookPlayerRender(BYTE* self, void*) {
+    const int result = HookFerrilRender(self, nullptr);
+    if (!g_arsenal.drawn || self != g_arsenal.rayne ||
+        self != *(BYTE**)G_PLAYER_OBJ || *(DWORD*)(self + 0x8344)) return result;
+    __try {
+        void* mgr = *(void**)G_RENDER_MGR;
+        if (mgr && !IsSpecialPass(mgr, 0) && !*(DWORD*)G_RENDER_TO_TEX &&
+            MgrIsVisible(mgr, 0, self + 0x98))
+            DrawConventionalPlayerWeapons(self);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return result;
+}
+
 static void PatchVtableSlot(DWORD slot, DWORD expected, DWORD target, const char* name) {
     DWORD* entry = (DWORD*)slot;
     if (*entry != expected) {
@@ -2702,7 +2847,7 @@ static void PatchVtableSlot(DWORD slot, DWORD expected, DWORD target, const char
 }
 
 static void InstallFerrilTattoo() {
-    PatchVtableSlot(0x7034FC, 0x0054AED0, (DWORD)HookFerrilRender, "render");
+    PatchVtableSlot(0x7034FC, 0x0054AED0, (DWORD)HookPlayerRender, "render");
     PatchVtableSlot(0x703520, 0x00551160, (DWORD)HookFerrilDamage, "onDamage");
 }
 
@@ -2861,11 +3006,15 @@ static void LoadConfig() {
     g_combat = !_stricmp(buf, "Enhanced") ? CombatEnhanced : CombatNormal;
     InterlockedExchange(&g_effects, 0);
     for (int effect = 0; effect < EffectCount; ++effect) {
-        const int defaultEnabled = effect == EffectGunCombat ? 0 : 1;
+        if (effect == EffectGunCombat) continue;
         if (GetPrivateProfileIntA("Combat", COMBAT_EFFECTS[effect].key,
-                                  defaultEnabled, ".\\br2mod.ini"))
+                                  1, ".\\br2mod.ini"))
             InterlockedOr(&g_effects, 1L << effect);
     }
+    g_gunCombat = GetPrivateProfileIntA("Combat", "gunCombat", GunCombatOff,
+                                        ".\\br2mod.ini");
+    if (g_gunCombat < GunCombatOff || g_gunCombat > GunCombatCapacity)
+        g_gunCombat = GunCombatOff;
     GetPrivateProfileStringA("Appearance", "skin", "default",
                              g_skinIni, sizeof g_skinIni, ".\\br2mod.ini");
     g_ferrilTattoo = GetPrivateProfileIntA("Appearance", "ferrilTattoo", 1,
@@ -2921,6 +3070,8 @@ static void LoadConfig() {
             if (COUNTS[i] == n) { g_countSel = i; break; }
         g_guns = GetPrivateProfileIntA("Challenge", "guns", 0,
                                        ".\\br2mod.ini") ? 1 : 0;
+        g_allGuns = GetPrivateProfileIntA("Challenge", "allGuns", 0,
+                                          ".\\br2mod.ini") ? 1 : 0;
         g_bars = GetPrivateProfileIntA("Challenge", "maxBars", 0,
                                        ".\\br2mod.ini") == 1 ? BarsMaximum : BarsBase;
     }
@@ -3146,8 +3297,12 @@ static DWORD WINAPI Worker(LPVOID) {
             const LONG effects = InterlockedCompareExchange(&g_effects, 0, 0);
             for (int effect = 0; effect < EffectCount; ++effect) {
                 const LONG bit = 1L << effect;
-                if ((effectsDirty & bit) && !WritePrivateProfileStringA("Combat",
-                    COMBAT_EFFECTS[effect].key, (effects & bit) ? "1" : "0", ".\\br2mod.ini"))
+                if (!(effectsDirty & bit)) continue;
+                char vb[4];
+                sprintf(vb, "%d", effect == EffectGunCombat ? g_gunCombat
+                                  : (effects & bit) ? 1 : 0);
+                if (!WritePrivateProfileStringA("Combat",
+                        COMBAT_EFFECTS[effect].key, vb, ".\\br2mod.ini"))
                     InterlockedOr(&g_effectsDirty, bit);
             }
         }
@@ -3164,6 +3319,8 @@ static DWORD WINAPI Worker(LPVOID) {
             WritePrivateProfileStringA("Challenge", "guns", NULL, ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "guns",
                                        g_guns ? "1" : "0", ".\\br2mod.ini");
+            WritePrivateProfileStringA("Challenge", "allGuns",
+                                       g_allGuns ? "1" : "0", ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "maxBars",
                                        g_bars == BarsMaximum ? "1" : "0", ".\\br2mod.ini");
             WritePrivateProfileStringA("Challenge", "character",

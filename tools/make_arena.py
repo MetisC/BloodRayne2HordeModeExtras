@@ -541,6 +541,94 @@ def main():
     open(out_scb, "wb").write(scb)
     print("scb    ->", os.path.basename(out_scb))
 
+
+# lvls[2] "All Weapons" variants: two copies of every conventional arsenal
+# type on a ring around the start point, so the enhanced-gun-combat pickup
+# collects the whole wheel during the first frames. Types 0-2 keep exact
+# stock stats; the content-cut types 3-8 borrow proven models and bullet
+# ammoTypes (the native launcher content was never shipped), so every
+# wheel entry is a functional weapon.
+ALLGUN_SPECS = [
+    # gunType, model, ammoType, fireRate, range
+    (0, "weapon_gun_automag.SMF", 21, 2, 75),
+    (1, "weapon_gun_shotgun.SMF", 14, 1, 200),
+    (2, "weapon_gun_uzi.SMF", 22, 5, 300),
+    (3, "weapon_gun_automag.SMF", 21, 1, 75),
+    (4, "weapon_gun_shotgun.SMF", 14, 1, 200),
+    (5, "weapon_gun_uzi.SMF", 22, 5, 300),
+    (6, "weapon_gun_uzi.SMF", 22, 8, 60),
+    (7, "weapon_gun_automag.SMF", 21, 1, 400),
+    (8, "weapon_gun_automag.SMF", 21, 1, 500),
+]
+ALLGUN_MODELS = ("weapon_gun_automag.SMF", "weapon_gun_shotgun.SMF",
+                 "weapon_gun_uzi.SMF")
+ALLGUN_BLOCK = (
+    '{ CGun "ArsenalGun%d"\n'
+    '\t%s    // pos\n'
+    '\t0,0,0    // orient\n'
+    '\t0    // enabled\n'
+    '\t""    // group\n'
+    '\t0    // attachCount\n'
+    '\t"%s"    // modelName\n'
+    '\t"(none)"\t\t// carriedByActor\n'
+    '\t0    // weaponState\n'
+    '\t999    // ammoCount\n'
+    '\t%d    // ammoType\n'
+    '\t5    // simTimer\n'
+    '\t%d    // fireRate\n'
+    '\t0    // canAttachLight\n'
+    '\t0    // effectiveRange\n'
+    '\t%d    // range\n'
+    '\t1    // weaponSpawnType\n'
+    '\t%d    // gunType\n'
+    '\t0    // isCustomGun\n'
+    '} CGun "ArsenalGun%d"')
+
+
+def inject_allguns(level, pos):
+    """Add the 18 "All Weapons" guns on a ring around pos ("x,y,z").
+
+    Returns (level, names); callers may append the names to the start warp
+    list. Guns placed at the warp destination need no warp themselves."""
+    hx, hy, hz = [float(v) for v in pos.split(",")]
+    blocks = []
+    n = 0
+    for gtype, model, ammo, rate, rng in ALLGUN_SPECS:
+        for _ in range(2):
+            a = 2 * math.pi * n / 18.0
+            gpos = "%.4g,%.6g,%.4g" % (hx + 1.4 * math.cos(a), hy,
+                                       hz + 1.4 * math.sin(a))
+            blocks.append(ALLGUN_BLOCK % (n, gpos, model, ammo, rate,
+                                          rng, gtype, n))
+            n += 1
+    names = ["ArsenalGun%d" % i for i in range(n)]
+    level, cnt = re.subn(
+        r'(// actor count\r?\n)(\d+)',
+        lambda m: m.group(1) + str(int(m.group(2)) + n), level, count=1)
+    assert cnt == 1, "actor count not found"
+    level = level.replace(
+        "// actor data list",
+        "".join('CGun "%s"\n' % nm for nm in names) + "// actor data list", 1)
+    assert "// hero name" in level
+    level = level.replace("// hero name",
+                          "\n".join(blocks) + "\n// hero name", 1)
+    # Resource entries for the borrowed models (loader preloads deps).
+    missing = [m for m in ALLGUN_MODELS
+               if ("models\\" + m).lower() not in level.lower()]
+    if missing:
+        level, cnt = re.subn(
+            r'(// file dependency list\r?\n)(\d+)(\r?\n)',
+            lambda m: m.group(1) + str(int(m.group(2)) + len(missing)) +
+            m.group(3), level, count=1)
+        assert cnt == 1, "dependency count not found"
+        level, cnt = re.subn(
+            r'(// file dependency list\r?\n\d+\r?\n)',
+            lambda m: m.group(1) +
+            "".join("models\\%s\n" % mod for mod in missing),
+            level, count=1)
+        assert cnt == 1
+    return level, names
+
     suffix = {15: "e", 25: "n", 50: "h", 100: "x", 250: "250"}
     for count, desired in zip(COUNTS, DESIRED):
         out_name = "%s_%s.lvl" % (a.name, suffix[count])

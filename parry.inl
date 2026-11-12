@@ -256,13 +256,14 @@ float __fastcall SampleCombatWorldFactor(void* manager, const BYTE* game, int ch
     const float finisher = ShowcaseWorldRate(now);
     const float execution = FeedExecutionWorldRate(now);
     const float hitstop = HitstopWorldRate(now);
+    const float wheel = ArsenalWheelOpen() ? g_enhanced.conventionalWheelRate : 1.0f;
     g_globalHitstopApplied = hitstop < 1.0f;
-    g_combatWorldRate = min(hitstop, min(g_parryPulseFactor, min(finisher, execution)));
+    g_combatWorldRate = min(hitstop, min(g_parryPulseFactor, min(finisher, min(execution, wheel))));
     const float world = native * g_combatWorldRate;
     const int frameMs = *(const int*)(game + 0x3D4);
     // The world clock truncates to whole milliseconds. Preserve a positive
     // native step here while character channels keep their fractional delta.
-    if (g_globalHitstopApplied && native > 0.0f && frameMs > 0)
+    if ((g_globalHitstopApplied || wheel < 1.0f) && native > 0.0f && frameMs > 0)
         return max(world, min(native, 1.0001f / frameMs));
     return world;
 }

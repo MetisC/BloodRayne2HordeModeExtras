@@ -294,8 +294,9 @@ def main():
         for count, default_desired in zip(make_arena.COUNTS, make_arena.CAMPAIGN_DESIRED):
             stem = "%s_%d" % (cfg["base"], count)
             desired = 2 if cfg["base"] == "chb_insect_plaza" else default_desired
-            for guns in (False, True):
-                outbase = stem + ("g" if guns else "")
+            for guns in (False, True, "all"):
+                outbase = stem + ("" if guns is False else
+                                  "g" if guns is True else "a")
                 level = original
                 weapon_names = blade_names.copy()
                 has_guns = bool(re.search(r'^\{ CMultigun "', level, re.M))
@@ -324,6 +325,12 @@ def main():
                 clean = make_arena.cover_arena_wave(clean, cfg["trigger"], bounds)
                 clean = make_arena.add_perimeter(
                     clean, bounds, cfg.get("boundary_classes", "CMainCharacter"))
+                if guns == "all":
+                    wp_pos = make_arena.actor_pos(clean, "CWayPoint", cfg["wp"])
+                    assert wp_pos, cfg["wp"]
+                    clean, all_names = make_arena.inject_allguns(
+                        clean, "%g,%g,%g" % tuple(wp_pos))
+                    weapon_names += all_names
                 event_flags = []
                 extra = []
                 setup = setup_tokens(a.src, cfg["lvl"])
@@ -351,7 +358,8 @@ def main():
                 with open(os.path.join(a.dst, outbase + ".scb"), "wb") as f:
                     f.write(scb)
                 print("%-31s source=%-22s count=%3d guns=%s" %
-                      (outbase, cfg["lvl"], count, "on" if guns else "off"))
+                      (outbase, cfg["lvl"], count,
+                       "all" if guns == "all" else "on" if guns else "off"))
 
 
 if __name__ == "__main__":

@@ -172,6 +172,8 @@
     X(float, conventionalPickupRadius, 5.f, 1.f, 10.f) \
     X(int, conventionalLowAmmo, 3, 0, 30) \
     X(float, conventionalDiscardSeconds, 5.f, 1.f, 30.f) \
+    X(float, conventionalWheelRate, 0.05f, 0.01f, 1.0f) \
+    X(float, conventionalWheelDim, 0.35f, 0.0f, 1.0f) \
     COMBAT_TRACE_SETTING(X)
 
 #ifdef BR2_COMBAT_TEST
@@ -204,6 +206,7 @@ unsigned long long CombatProfile(const EnhancedSettings& settings, bool enhanced
         strcmp(#key, "styleRankSSS") != 0 && strcmp(#key, "styleRankV") != 0 && \
         strcmp(#key, "ephemeraHitstopScale") != 0 && strcmp(#key, "parryGuardMs") != 0 && \
         strcmp(#key, "conventionalLowAmmo") != 0 && \
+        strcmp(#key, "conventionalWheelDim") != 0 && \
         strncmp(#key, "feedEscape", 10) != 0 && \
         (enhancedGuns || (strstr(#key, "AmmoPool") == nullptr && \
                          strncmp(#key, "conventional", 12) != 0))) { \
@@ -288,7 +291,7 @@ void ReadEnhancedSettings() {
 void SampleEnhancedSettings() {
     if (TryAcquireSRWLockShared(&g_enhancedLock)) {
         const bool enhancedGuns = g_combat == CombatEnhanced &&
-                                  CombatEffectEnabled(EffectGunCombat);
+                                  GunCapacityEnhanced();
         g_enhanced = g_pendingEnhanced;
         g_combatProfile = g_pendingCombatProfiles[enhancedGuns];
         ReleaseSRWLockShared(&g_enhancedLock);

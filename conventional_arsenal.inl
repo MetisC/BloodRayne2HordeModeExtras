@@ -1,7 +1,10 @@
 namespace {
 constexpr DWORD ConventionalGunVtable = 0x6FAA44;
 constexpr DWORD LiveWeaponTag = 0x78A123;
-constexpr unsigned ConventionalTypes = 9;
+constexpr DWORD InactiveWeaponTag = 0x6F3874E;
+constexpr int ChallengeStartingRounds = 999;
+// Native CGun types 0..2: Automag, sawed-off shotgun and Uzi.
+constexpr unsigned ConventionalTypes = 3;
 constexpr unsigned BloodModes = 6;
 constexpr unsigned ArsenalCapacity = ConventionalTypes * 2;
 constexpr unsigned WheelEntries = ConventionalTypes + BloodModes;
@@ -13,7 +16,7 @@ constexpr unsigned LeftWeaponController = 0x47A4;
 constexpr unsigned RightWeaponController = 0x481C;
 
 struct ArsenalInput {
-    bool wheel, drop, fire, previous, next, equip, stow;
+    bool wheel, fire, previous, next, equipRight, equipLeft;
     float horizontal, vertical;
 };
 struct DroppedGun {
@@ -29,7 +32,12 @@ struct Arsenal {
     ArsenalInput previous;
     unsigned hands[2], preview;
     bool wheel, firing, drawn, primed, fireBlocked, bloodInitialized;
-    int aimAnimation;
+    bool startingGunsChecked;
+    bool dimmed;
+    BYTE* fadeObject;
+    float fadeSaved[5];
+    DWORD holdStart[2];
+    bool holdDropped[2];
     DroppedGun dropped[64];
     PhotoVec aimPoints[2];
     bool hasAimPoint[2];
@@ -44,13 +52,76 @@ template<class T> T& ArsenalField(BYTE* object, unsigned offset) {
     return *reinterpret_cast<T*>(object + offset);
 }
 
+// Native screen fade owned by the script object (PhotoScript), as written by
+// the fade(visibility,r,g,b,duration) script command. +0x20C is visibility
+// (1.0 = clear screen), the other floats are the cover color and duration.
+constexpr unsigned FadeStateOffset = 0x200;
+
+void RestoreArsenalFade() {
+    if (!g_arsenal.dimmed) return;
+    // Only the object that produced the saved state is safe to write back;
+    // a scene change may have recycled the script global meanwhile.
+    if (g_arsenal.fadeObject && g_arsenal.fadeObject == *(BYTE**)PhotoScript)
+        memcpy(g_arsenal.fadeObject + FadeStateOffset, g_arsenal.fadeSaved,
+               sizeof g_arsenal.fadeSaved);
+    g_arsenal.dimmed = false;
+    g_arsenal.fadeObject = nullptr;
+}
+
+void SyncArsenalFade() {
+    if (!g_arsenal.wheel) { RestoreArsenalFade(); return; }
+    auto* object = *(BYTE**)PhotoScript;
+    if (!object) { g_arsenal.dimmed = false; g_arsenal.fadeObject = nullptr; return; }
+    if (!g_arsenal.dimmed || g_arsenal.fadeObject != object) {
+        memcpy(g_arsenal.fadeSaved, object + FadeStateOffset, sizeof g_arsenal.fadeSaved);
+        g_arsenal.fadeObject = object;
+        g_arsenal.dimmed = true;
+    }
+    auto* fade = reinterpret_cast<float*>(object + FadeStateOffset);
+    fade[0] = fade[1] = fade[2] = 0.f;
+    fade[3] = g_enhanced.conventionalWheelDim;
+    fade[4] = 0.f;
+}
+
 bool ArsenalEnabled() {
     return g_arsenalReady && g_combat == CombatEnhanced &&
            CombatEffectEnabled(EffectGunCombat);
 }
 
-int ConventionalAnimation(BYTE* rayne, const char* name);
+bool ArsenalWheelOpen() { return g_arsenalReady && g_arsenal.wheel; }
+
 bool AimConventionalGun(BYTE* gun, const PhotoVec& target);
+
+void AlignConventionalGrip(BYTE* gun, BYTE* rayne, int hand) {
+    // Grip offsets in model space. The native attachment supplies
+    // the palm and orientation for each side.
+    constexpr PhotoVec grips[] = {
+        {0.f, .034f, .155f}, // Automag
+        {0.f, -.06f, .155f}, // sawed-off
+        {0.f, .006f, .155f}, // Uzi
+    };
+    static_assert(_countof(grips) == ConventionalTypes, "Grip per supported model");
+    const unsigned type = ArsenalField<unsigned>(gun, 0x1CC);
+    if (type >= ConventionalTypes) return;
+    const auto& grip = grips[type];
+    auto& position = ArsenalField<PhotoVec>(gun, 0x38);
+    const auto* basis = reinterpret_cast<const float*>(gun + 0x50);
+    // Subtract the local grip from the hand anchor. Increasing its depth
+    // moves the model back toward the palm, along its own barrel axis.
+    const float gripDepth = grip.z + .145f;
+    const float gripHeight = grip.y - .033f;
+    position.x -= basis[0]*grip.x + basis[1]*gripHeight + basis[2]*gripDepth;
+    position.y -= basis[3]*grip.x + basis[4]*gripHeight + basis[5]*gripDepth;
+    position.z -= basis[6]*grip.x + basis[7]*gripHeight + basis[8]*gripDepth;
+    if (type == 0) {
+        // Use Rayne's sideways axis so wrist roll doesn't turn this into
+        // a vertical adjustment. Mirror the offset for the left hand.
+        const auto* actorBasis = reinterpret_cast<const float*>(rayne + 0x50);
+        const float outward = hand == RightGunHand ? .02f : -.02f;
+        position.x += outward * actorBasis[0];
+        position.z += outward * actorBasis[6];
+    }
+}
 
 BYTE* SelectedConventionalGun(unsigned slot) {
     return slot && slot <= ArsenalCapacity ? g_arsenal.guns[slot - 1] : nullptr;
@@ -96,17 +167,7 @@ bool MountConventionalGun(BYTE* rayne, BYTE* gun, int hand) {
 }
 
 void RestoreConventionalPose() {
-    if (g_arsenal.firing && g_arsenal.rayne &&
-        g_arsenal.rayne == *(BYTE**)0x7DCD68 &&
-        g_arsenal.situation == *(void**)G_SITUATION &&
-        ArsenalField<int>(g_arsenal.rayne, 0x17C) == g_arsenal.aimAnimation &&
-        ArsenalField<float>(g_arsenal.rayne, 0x39C8) > 0.f) {
-        const int idle = ConventionalAnimation(g_arsenal.rayne, "stand_alert");
-        if (idle >= 0)
-            ((void (__thiscall*)(BYTE*, int))0x415600)(g_arsenal.rayne + 0x158, idle);
-    }
     g_arsenal.firing = false;
-    g_arsenal.aimAnimation = -1;
 }
 
 void DropConventionalGun(BYTE* gun) {
@@ -128,6 +189,7 @@ void ClearConventionalArsenal(bool release) {
             __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
     }
+    RestoreArsenalFade();
     g_arsenal = {};
 }
 
@@ -148,6 +210,8 @@ bool ArsenalSceneMatches() {
 }
 
 unsigned ArsenalHandIndex(int hand) { return hand == RightGunHand ? 0 : 1; }
+
+bool ArsenalManagesBlood(BYTE* rayne);
 
 BYTE* ArsenalWeaponController(BYTE* rayne, int hand) {
     return rayne + (hand == RightGunHand ? RightWeaponController : LeftWeaponController);
@@ -183,6 +247,17 @@ void __fastcall UpdateConventionalArm(BYTE* rayne, void*, BYTE* controller, floa
     if (!ArsenalEnabled() || !ArsenalSceneMatches() || rayne != g_arsenal.rayne ||
         !g_arsenal.primed || !g_arsenal.drawn || g_arsenal.wheel ||
         !EquippedConventional(ArsenalHandIndex(hand))) {
+        // A hand emptied through the wheel keeps its weapon controller
+        // armed natively; the update decays controller+0x5C only while
+        // rayne+0x82B0 is zero, so sink it to relax this arm.
+        if (ArsenalManagesBlood(rayne) && !g_arsenal.hands[ArsenalHandIndex(hand)]) {
+            float& active = ArsenalField<float>(rayne, 0x82B0);
+            const float original = active;
+            active = 0.f;
+            __try { update(rayne, controller, delta); }
+            __finally { active = original; }
+            return;
+        }
         update(rayne, controller, delta);
         return;
     }
@@ -209,12 +284,7 @@ int __fastcall DrawConventionalGun(BYTE* gun, void*) {
             for (auto* stored : g_arsenal.guns) {
                 if (stored != gun) continue;
                 if (ArsenalField<BYTE*>(gun, 0x1F4) != g_arsenal.rayne) break;
-                const int hand = EquippedGunHand(gun);
-                if (hand < 0 || !g_arsenal.drawn ||
-                    !MountConventionalGun(g_arsenal.rayne, gun, hand)) return 0;
-                const unsigned index = ArsenalHandIndex(hand);
-                if (g_arsenal.hasAimPoint[index]) AimConventionalGun(gun, g_arsenal.aimPoints[index]);
-                break;
+                return 0; // player-owned models are submitted with Rayne
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -223,6 +293,31 @@ int __fastcall DrawConventionalGun(BYTE* gun, void*) {
     if (((BYTE (__thiscall*)(BYTE*))methods[0x100 / 4])(gun))
         ((void (__thiscall*)(BYTE*))methods[0xCC / 4])(gun);
     return ((int (__thiscall*)(BYTE*))0x6830B0)(gun);
+}
+
+void DrawConventionalPlayerWeapons(BYTE* rayne) {
+    if (!ArsenalEnabled() || rayne != g_arsenal.rayne ||
+        !ArsenalSceneMatches() || !g_arsenal.drawn) return;
+    for (unsigned index = 0; index < 2; ++index) {
+        auto* gun = EquippedConventional(index);
+        if (!gun || ArsenalField<BYTE*>(gun, 0x1F4) != rayne ||
+            !MountConventionalGun(rayne, gun, HandSlots[index])) continue;
+        const auto savedPosition = ArsenalField<PhotoVec>(gun, 0x38);
+        float savedBasis[9];
+        memcpy(savedBasis, gun + 0x50, sizeof savedBasis);
+        if (g_arsenal.hasAimPoint[index]) AimConventionalGun(gun, g_arsenal.aimPoints[index]);
+        AlignConventionalGrip(gun, rayne, HandSlots[index]);
+        // Submit the mounted model just like the native blood gun renderer,
+        // without depending on the ground weapon's visibility bounds.
+        ((void (__thiscall*)(BYTE*))0x4031C0)(gun);
+        __try {
+            ((void (__thiscall*)(BYTE*, int))0x57D5F0)(gun + 0x158, 0);
+        } __finally {
+            ((void (__thiscall*)(BYTE*))0x4031E0)(gun);
+            ArsenalField<PhotoVec>(gun, 0x38) = savedPosition;
+            memcpy(gun + 0x50, savedBasis, sizeof savedBasis);
+        }
+    }
 }
 
 BYTE* ArsenalBloodGun(BYTE* rayne, unsigned hand) {
@@ -430,6 +525,52 @@ BYTE* NearestGroundGun(BYTE* rayne) {
     return nearest;
 }
 
+void ProbeArsenalGuns(BYTE* rayne) {
+    auto* world = *(void**)0x7C5D50;
+    // Anchor to the exe dir: the launcher's CWD may not be the game dir.
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, sizeof(path));
+    char* last = strrchr(path, '\\');
+    if (last) last[1] = 0;
+    strcat_s(path, "MODDING\\arsenal_probe.txt");
+    FILE* out = fopen(path, "a");
+    if (!out) out = fopen("arsenal_probe.txt", "a");
+    if (!out) {
+        out = fopen("C:\\arsenal_probe.txt", "a");
+        if (!out) return;
+    }
+    char cwd[MAX_PATH] = "";
+    GetCurrentDirectoryA(sizeof(cwd), cwd);
+    fprintf(out, "(cwd=%s probe_path=%s)\n", cwd, path);
+    const auto& pos = ArsenalField<PhotoVec>(rayne, 0x38);
+    fprintf(out, "=== rayne=%p pos=%g,%g,%g world=%p radius=%g ===\n",
+            rayne, pos.x, pos.y, pos.z, world, g_enhanced.conventionalPickupRadius);
+    BYTE* nearby[64];
+    const auto query = (int (__thiscall*)(void*, const PhotoVec*, float, BYTE**, int, const char*))0x5E27D0;
+    const int count = world ? max(0, min((int)_countof(nearby),
+        query(world, &pos, 20.f, nearby, _countof(nearby), "CWeapon"))) : -1;
+    fprintf(out, "query CWeapon r=20 -> %d\n", count);
+    for (int i = 0; i < count; ++i) {
+        auto* gun = nearby[i];
+        if (!gun) continue;
+        const float d = sqrtf(GunDistanceSquared(gun, pos));
+        fprintf(out, "  %p vt=%08X tag=%08X carrier=%p wstate=%d type=%u ammo=%d cap=%d dist=%g\n",
+                gun, ArsenalField<DWORD>(gun, 0), ArsenalField<DWORD>(gun, 0x28),
+                ArsenalField<BYTE*>(gun, 0x1F4), ArsenalField<int>(gun, 0x1C8),
+                ArsenalField<unsigned>(gun, 0x1CC), ArsenalField<int>(gun, 0x29C),
+                ArsenalField<int>(gun, 0x2A0), d);
+    }
+    for (unsigned i = 0; i < ArsenalCapacity; ++i)
+        if (g_arsenal.guns[i]) {
+            auto* gun = g_arsenal.guns[i];
+            fprintf(out, "  stored[%u]=%p carrier=%p ammo=%d cap=%d tag=%08X\n", i, gun,
+                    ArsenalField<BYTE*>(gun, 0x1F4), ArsenalField<int>(gun, 0x29C),
+                    ArsenalField<int>(gun, 0x2A0), ArsenalField<DWORD>(gun, 0x28));
+        }
+    fprintf(out, "hands=%u,%u wheel=%d\n\n", g_arsenal.hands[0], g_arsenal.hands[1], g_arsenal.wheel);
+    fclose(out);
+}
+
 void SetArsenalNotice(const char* label, DWORD now, int rounds = 0) {
     g_arsenal.notice = label;
     g_arsenal.noticeUntil = now + 1800;
@@ -453,17 +594,59 @@ int RefillConventionalCopies(BYTE* gun, unsigned first) {
     return initial - available;
 }
 
+bool StoreConventionalGun(BYTE* gun, unsigned index) {
+    auto* rayne = g_arsenal.rayne;
+    if (!MountConventionalGun(rayne, gun, RightGunHand)) return false;
+    ((void (__thiscall*)(BYTE*, BYTE*))0x507FA0)(gun, rayne);
+    if (ArsenalField<BYTE*>(gun, 0x1F4) != rayne) return false;
+    for (auto& item : g_arsenal.dropped)
+        if (item.gun == gun) item = {};
+    g_arsenal.guns[index] = gun;
+    return true;
+}
+
+void GrantChallengeStartingGuns() {
+    if (g_arsenal.startingGunsChecked) return;
+    g_arsenal.startingGunsChecked = true;
+    if (!g_allGuns || !CurrentChallengeGrantsAllGuns()) return;
+
+    // Resolve the level's authored guns by name, including dormant actors
+    // outside the spatial pickup query. Validate the whole set before granting.
+    const auto findActor = (BYTE* (__thiscall*)(void*, const char*))0x578CF0;
+    const auto setPresent = (void (__thiscall*)(void*, BYTE*, int))0x578EF0;
+    BYTE* guns[ArsenalCapacity] = {};
+    for (unsigned index = 0; index < ArsenalCapacity; ++index) {
+        char name[32];
+        sprintf_s(name, "ArsenalGun%u", index);
+        auto* gun = findActor(g_arsenal.situation, name);
+        if (!gun || ArsenalField<DWORD>(gun, 0) != ConventionalGunVtable ||
+            ArsenalField<unsigned>(gun, 0x1CC) != index / 2 ||
+            ArsenalField<BYTE*>(gun, 0x1F4)) return;
+        const DWORD tag = ArsenalField<DWORD>(gun, 0x28);
+        if (tag != LiveWeaponTag && tag != InactiveWeaponTag) return;
+        guns[index] = gun;
+    }
+    for (unsigned index = 0; index < ArsenalCapacity; ++index) {
+        auto* gun = guns[index];
+        const bool inactive = ArsenalField<DWORD>(gun, 0x28) == InactiveWeaponTag;
+        if (inactive) setPresent(g_arsenal.situation, gun, 1);
+        if (!StoreConventionalGun(gun, index)) {
+            if (inactive) setPresent(g_arsenal.situation, gun, 0);
+            continue;
+        }
+        auto& capacity = ArsenalField<int>(gun, 0x2A0);
+        capacity = max(capacity, ChallengeStartingRounds);
+        ArsenalField<int>(gun, 0x29C) = capacity;
+    }
+}
+
 bool PickUpConventionalGun(BYTE* gun, DWORD now) {
-    const unsigned first = ArsenalField<unsigned>(gun, 0x1CC) * 2;
+    const unsigned type = ArsenalField<unsigned>(gun, 0x1CC);
+    if (type >= ConventionalTypes) return false;
+    const unsigned first = type * 2;
     for (unsigned index = first; index < first + 2; ++index) {
         if (g_arsenal.guns[index]) continue;
-        auto* rayne = g_arsenal.rayne;
-        if (!MountConventionalGun(rayne, gun, RightGunHand)) return false;
-        ((void (__thiscall*)(BYTE*, BYTE*))0x507FA0)(gun, rayne);
-        if (ArsenalField<BYTE*>(gun, 0x1F4) != rayne) return false;
-        for (auto& item : g_arsenal.dropped)
-            if (item.gun == gun) item = {};
-        g_arsenal.guns[index] = gun;
+        if (!StoreConventionalGun(gun, index)) return false;
         for (auto& hand : g_arsenal.hands) {
             if (hand) continue;
             hand = index + 1;
@@ -534,9 +717,8 @@ bool DropArsenalSlot(unsigned slot) {
 ArsenalInput ReadArsenalInput() {
     ArsenalInput input = {};
     input.wheel = PhotoKey(VK_F7);
-    input.drop = PhotoKey(VK_F8);
-    input.equip = PhotoKey(VK_F9);
-    input.stow = PhotoKey(VK_F6);
+    input.equipLeft = PhotoKey(VK_F6);
+    input.equipRight = PhotoKey(VK_F9);
     input.previous = PhotoKey(VK_LEFT);
     input.next = PhotoKey(VK_RIGHT);
     using PadState = DWORD (WINAPI*)(DWORD, XINPUT_STATE*);
@@ -548,9 +730,8 @@ ArsenalInput ReadArsenalInput() {
         if (((PadState)0x6CB192)(slot, &state) != ERROR_SUCCESS) continue;
         const auto& pad = state.Gamepad;
         input.wheel |= pad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD;
-        input.drop |= (pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
-        input.equip |= (pad.wButtons & XINPUT_GAMEPAD_Y) != 0;
-        input.stow |= (pad.wButtons & XINPUT_GAMEPAD_X) != 0;
+        input.equipRight |= (pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+        input.equipLeft |= (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
         input.previous |= (pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
         input.next |= (pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
         input.horizontal = pad.sThumbRX / 32768.f;
@@ -563,9 +744,8 @@ ArsenalInput ReadArsenalInput() {
         if (!ReadPhotoPad(slot, sticks)) continue;
         const DWORD* buttons = (const DWORD*)(0x7E10A0 + slot * 0x1E4 + 0xE0);
         input.wheel |= buttons[7] != 0;
-        input.drop |= buttons[11] != 0;
-        input.equip |= buttons[3] != 0;
-        input.stow |= buttons[0] != 0;
+        input.equipRight |= buttons[11] != 0;
+        input.equipLeft |= buttons[10] != 0;
         input.previous |= buttons[28] != 0;
         input.next |= buttons[31] != 0;
         input.horizontal = sticks.yaw;
@@ -575,7 +755,7 @@ ArsenalInput ReadArsenalInput() {
     return input;
 }
 
-void FilterArsenalWheelActions(BYTE* actions, bool wheelHeld) {
+void FilterArsenalWheelActions(BYTE* actions, bool wheelHeld, bool pad = false) {
     auto& fire = ArsenalField<int>(actions, 0x4C);
     if (!wheelHeld && !g_arsenal.wheel && !g_arsenal.fireBlocked) return;
     if (fire == 1) {
@@ -583,7 +763,19 @@ void FilterArsenalWheelActions(BYTE* actions, bool wheelHeld) {
         // Leave the mapped state intact for its next held/release update.
         // Both firing paths consult fireBlocked before using it.
     } else if (fire == 2) g_arsenal.fireBlocked = false;
-    if (!wheelHeld && !g_arsenal.wheel) return;
+    if (wheelHeld && pad) {
+        // Native follow still runs. Only mute the manual yaw/pitch axes
+        // in the mapped actions; the wheel reads the raw pad separately.
+        ArsenalField<float>(actions, 0x10) = 0.f;
+        ArsenalField<float>(actions, 0x18) = 0.f;
+    }
+    if (g_arsenal.wheel) {
+        // No mapped button reaches the character while the wheel is open.
+        for (unsigned action = 0; action < 33; ++action)
+            ArsenalField<int>(actions, 0x1C + action * 8) = 0;
+        return;
+    }
+    if (!wheelHeld) return;
     constexpr unsigned usedActions[] = {0, 2, 4, 5, 8, 10};
     for (unsigned action : usedActions) {
         auto& state = ArsenalField<int>(actions, 0x1C + action * 8);
@@ -600,12 +792,20 @@ void __fastcall MapArsenalPad(BYTE* game, void*, BYTE* actions, int player) {
     }
     auto* settings = *(BYTE**)0x7C07F8;
     const int slot = settings ? ArsenalField<int>(settings, 0x200) : -1;
-    if (slot < 0 || slot >= 4) { native(game, actions, player); return; }
+    if (slot < 0 || slot >= 4) {
+        native(game, actions, player);
+        FilterArsenalWheelActions(actions, ReadArsenalInput().wheel, true);
+        return;
+    }
     using PadState = DWORD (WINAPI*)(DWORD, XINPUT_STATE*);
     XINPUT_STATE state = {};
     const bool xbox = ((PadState)0x6CB192)(slot, &state) == ERROR_SUCCESS;
     PhotoPad sony = {};
-    if (!xbox && !ReadPhotoPad(slot, sony)) { native(game, actions, player); return; }
+    if (!xbox && !ReadPhotoPad(slot, sony)) {
+        native(game, actions, player);
+        FilterArsenalWheelActions(actions, ReadArsenalInput().wheel, true);
+        return;
+    }
     const int trigger = xbox ? 5 : 7;
     auto* bindings = (int*)(game + 0x138);
     const int savedFire = bindings[6], savedCycle = bindings[11];
@@ -625,7 +825,7 @@ void __fastcall MapArsenalPad(BYTE* game, void*, BYTE* actions, int player) {
         bindings[11] = savedCycle;
     }
     if (muteCycle) ArsenalField<int>(actions, 0x74) = 0;
-    FilterArsenalWheelActions(actions, ReadArsenalInput().wheel);
+    FilterArsenalWheelActions(actions, ReadArsenalInput().wheel, true);
 }
 
 void __fastcall MapArsenalKeyboard(BYTE* game, void*, BYTE* actions) {
@@ -635,36 +835,45 @@ void __fastcall MapArsenalKeyboard(BYTE* game, void*, BYTE* actions) {
         FilterArsenalWheelActions(actions, ReadArsenalInput().wheel);
 }
 
-int ConventionalAnimation(BYTE* rayne, const char* name) {
-    BYTE* controller = rayne + 0x158;
-    void* skeleton = ((void* (__thiscall*)(BYTE*))0x605FF0)(controller);
-    // 0x605200 resolves the motion table. 0x605280 resolves range tags.
-    return skeleton ? ((int (__thiscall*)(void*, const char*, int))0x605200)(skeleton, name, 0) : -1;
-}
-
-void PlayConventionalAnimation(BYTE* rayne, const char* name) {
-    const int animation = ConventionalAnimation(rayne, name);
-    if (animation >= 0) {
-        if (ArsenalField<int>(rayne, 0x17C) != animation)
-            ((void (__thiscall*)(BYTE*, int))0x415600)(rayne + 0x158, animation);
-        g_arsenal.aimAnimation = animation;
-    }
-}
-
 bool AimConventionalGun(BYTE* gun, const PhotoVec& target) {
     const auto& position = ArsenalField<PhotoVec>(gun, 0x38);
-    float x = target.x - position.x, y = target.y - position.y, z = target.z - position.z;
-    const float norm = sqrtf(x*x + y*y + z*z), flat = sqrtf(x*x + z*z);
-    if (!_finite(norm) || norm < .001f) return false;
-    // At a vertical angle there is no horizontal heading to normalize.
-    const float rightX = flat > .001f ? z / flat : 1.f;
-    const float rightZ = flat > .001f ? -x / flat : 0.f;
-    x /= norm; y /= norm; z /= norm;
-    // CGun's direction getter uses column 3. The real muzzle offset and the
-    // projectile both use this same basis inside CGun::fire.
-    const float aimBasis[] = {rightX, y * rightZ, x, 0.f, z * rightX - x * rightZ, y,
-                              rightZ, -y * rightX, z};
-    memcpy(gun + 0x50, aimBasis, sizeof aimBasis);
+    const auto dot = [](const PhotoVec& a, const PhotoVec& b) {
+        return a.x*b.x + a.y*b.y + a.z*b.z;
+    };
+    const auto normalize = [&](PhotoVec& v) {
+        const float length = sqrtf(dot(v, v));
+        if (!_finite(length) || length < .001f) return false;
+        v.x /= length; v.y /= length; v.z /= length;
+        return true;
+    };
+    const auto cross = [](const PhotoVec& a, const PhotoVec& b) -> PhotoVec {
+        return {a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x};
+    };
+    PhotoVec forward = {target.x - position.x, target.y - position.y, target.z - position.z};
+    auto* basis = reinterpret_cast<float*>(gun + 0x50);
+    PhotoVec handForward = {basis[2], basis[5], basis[8]};
+    PhotoVec right = {basis[0], basis[3], basis[6]};
+    if (!normalize(forward) || !normalize(handForward) || !normalize(right)) return false;
+
+    // Carry the wrist's roll along the shortest rotation from the mounted
+    // barrel to the target. World up would straighten both guns.
+    const float denominator = 1.f + dot(handForward, forward);
+    if (denominator > .001f) {
+        const float amount = dot(right, forward) / denominator;
+        right.x -= amount * (handForward.x + forward.x);
+        right.y -= amount * (handForward.y + forward.y);
+        right.z -= amount * (handForward.z + forward.z);
+    }
+    // Also handles a target directly behind the mounted barrel.
+    const float alongBarrel = dot(right, forward);
+    right.x -= alongBarrel * forward.x;
+    right.y -= alongBarrel * forward.y;
+    right.z -= alongBarrel * forward.z;
+    if (!normalize(right)) return false;
+    const PhotoVec up = cross(forward, right);
+    const float aimBasis[] = {right.x, up.x, forward.x, right.y, up.y, forward.y,
+                              right.z, up.z, forward.z};
+    memcpy(basis, aimBasis, sizeof aimBasis);
     return true;
 }
 
@@ -672,14 +881,17 @@ bool FireConventionalGun(BYTE* gun, int hand, const PhotoVec* target) {
     if (!gun || ArsenalField<int>(gun, 0x29C) <= 0 ||
         !MountConventionalGun(g_arsenal.rayne, gun, hand)) return false;
     float saved[9];
+    const auto savedPosition = ArsenalField<PhotoVec>(gun, 0x38);
     auto* basis = reinterpret_cast<float*>(gun + 0x50);
     memcpy(saved, basis, sizeof saved);
     int fired = 0;
     __try {
         if (target) AimConventionalGun(gun, *target);
+        AlignConventionalGrip(gun, g_arsenal.rayne, hand);
         fired = ((int (__thiscall*)(BYTE*, float))0x508460)(gun, 1.f);
     } __finally {
         memcpy(basis, saved, sizeof saved);
+        ArsenalField<PhotoVec>(gun, 0x38) = savedPosition;
     }
     return fired != 0;
 }
@@ -692,61 +904,69 @@ unsigned ArsenalCount(unsigned entry) {
 
 bool ArsenalEntryInHand(unsigned entry, unsigned hand) {
     const unsigned slot = g_arsenal.hands[hand];
-    if (entry < BloodModes) return slot == BloodSlot && entry == CurrentBloodMode();
+    // All six blood entries share the same two native guns, so the markers
+    // and stow apply regardless of which mode is currently selected.
+    if (entry < BloodModes) return slot == BloodSlot;
     return slot && slot <= ArsenalCapacity && (slot - 1) / 2 == entry - BloodModes;
 }
 
-void EquipArsenalEntry(unsigned entry) {
+// Tap on the highlighted wheel entry with that hand's equip button:
+// equips into the hand, or stows it when already equipped there.
+void TapArsenalHand(unsigned hand) {
+    const unsigned entry = g_arsenal.preview;
     if (!ArsenalCount(entry)) return;
-    const bool blood = entry < BloodModes;
-    const bool right = blood ? BloodInHand(0) : ArsenalEntryInHand(entry, 0);
-    const bool left = blood ? BloodInHand(1) : ArsenalEntryInHand(entry, 1);
-    if (blood) {
-        const bool changingMode = entry != CurrentBloodMode();
+    const unsigned slot = g_arsenal.hands[hand];
+    if (entry < BloodModes) {
+        if (slot == BloodSlot && entry == CurrentBloodMode()) {
+            g_arsenal.hands[hand] = 0;
+            CompactArsenalHands();
+            return;
+        }
         SelectBloodMode(entry);
-        if (changingMode && (right || left)) return;
+        g_arsenal.hands[hand] = BloodSlot;
+        return;
     }
-    if (right && left) return;
-    unsigned slot = BloodSlot;
-    if (!blood) {
-        const unsigned first = (entry - BloodModes) * 2 + 1;
-        slot = 0;
-        for (unsigned candidate = first; candidate < first + 2; ++candidate)
-            if (SelectedConventionalGun(candidate) && candidate != g_arsenal.hands[0] &&
-                candidate != g_arsenal.hands[1]) { slot = candidate; break; }
-        if (!slot) return;
-    }
-    const unsigned hand = right ? 1 : left ? 0 : !g_arsenal.hands[0] ? 0 :
-                          !g_arsenal.hands[1] ? 1 : 0;
-    g_arsenal.hands[hand] = slot;
-    if (!blood) g_arsenal.drawn = true;
-}
-
-void RemoveArsenalEntry(unsigned entry, bool drop) {
-    if (!ArsenalCount(entry) || (drop && entry < BloodModes)) return;
-    const int hand = ArsenalEntryInHand(entry, 1) ? 1 : ArsenalEntryInHand(entry, 0) ? 0 : -1;
-    if (drop) {
-        unsigned slot = hand >= 0 ? g_arsenal.hands[hand] : (entry - BloodModes) * 2 + 1;
-        if (hand < 0 && !SelectedConventionalGun(slot)) ++slot;
-        auto* gun = SelectedConventionalGun(slot);
-        if (!gun) return;
-        const bool empty = ArsenalField<int>(gun, 0x29C) <= 0;
-        if (!DropArsenalSlot(slot)) return;
-        if (hand >= 0) g_arsenal.hands[hand] = 0;
-        CompactArsenalHands();
-        if (hand >= 0 && empty && !g_arsenal.hands[0] && BloodModeAvailable(CurrentBloodMode()))
-            g_arsenal.hands[0] = BloodSlot;
-    } else if (hand >= 0) {
+    if (slot && slot <= ArsenalCapacity && (slot - 1) / 2 == entry - BloodModes) {
         g_arsenal.hands[hand] = 0;
         CompactArsenalHands();
+        return;
     }
+    const unsigned first = (entry - BloodModes) * 2 + 1;
+    unsigned pick = 0;
+    for (unsigned candidate = first; candidate < first + 2; ++candidate)
+        if (SelectedConventionalGun(candidate) && g_arsenal.hands[1 - hand] != candidate) {
+            pick = candidate;
+            break;
+        }
+    if (!pick)
+        for (unsigned candidate = first; candidate < first + 2; ++candidate)
+            if (SelectedConventionalGun(candidate)) { pick = candidate; break; }
+    if (!pick) return;
+    // A gun moving over from the other hand leaves it empty.
+    if (g_arsenal.hands[1 - hand] == pick) g_arsenal.hands[1 - hand] = 0;
+    g_arsenal.hands[hand] = pick;
+    g_arsenal.drawn = true;
+}
+
+// Held equip button: drop the conventional gun in that hand. Blood weapons
+// stay with Rayne and are never dropped.
+void DropArsenalHand(unsigned hand) {
+    const unsigned slot = g_arsenal.hands[hand];
+    if (!slot || slot == BloodSlot) return;
+    auto* gun = SelectedConventionalGun(slot);
+    if (!gun) return;
+    const bool empty = ArsenalField<int>(gun, 0x29C) <= 0;
+    if (!DropArsenalSlot(slot)) return;
+    g_arsenal.hands[hand] = 0;
+    CompactArsenalHands();
+    if (empty && !g_arsenal.hands[0] && BloodModeAvailable(CurrentBloodMode()))
+        g_arsenal.hands[0] = BloodSlot;
 }
 
 const char* ArsenalEntryName(unsigned entry) {
     static const char* const names[] = {
         "Blood Shot", "Blood Stream", "Blood Spray", "Blood Bomb", "Blood Flame", "Blood Hammer",
-        "Pistol", "Sawed Off shotgun", "SMG", "Grenade", "Grenade Launcher", "Assault Rifle",
-        "Flame Thrower", "Rocket Launcher", "Snip[er Rifle"
+        "Pistol", "Sawed Off shotgun", "Uzi"
     };
     static_assert(_countof(names) == WheelEntries, "Complete weapon catalog");
     return ModLocalize(names[entry], true);
@@ -763,6 +983,7 @@ void DrawArsenalHud(DWORD now) {
     const auto draw = (void (__thiscall*)(void*, int, int, DWORD, DWORD, const char*))0x4E6C60;
     const auto scale = (void (__thiscall*)(BYTE*, float))0x4F9690;
     constexpr DWORD rightColor = 0xFFFFC979, leftColor = 0xFF83CFFF;
+    constexpr DWORD bloodColor = 0xFFFF626B, unavailableBloodColor = 0xFFAE6870;
     __try {
         scale(font, ((g_arsenal.wheel ? 12.f : 16.f) * height / 480.f) / base);
         char label[128];
@@ -775,7 +996,10 @@ void DrawArsenalHud(DWORD now) {
                 const int y = (int)(height * (.45f - .32f * cosf(angle)));
                 sprintf_s(label, "%s%s x%u%s", cursor ? "[ " : "", ArsenalEntryName(entry),
                           count, cursor ? " ]" : "");
-                draw(font, x, y, count ? 0xFFFFFFFF : 0xFF898989, 0xFF000000, label);
+                const DWORD color = entry < BloodModes
+                    ? (count ? bloodColor : unavailableBloodColor)
+                    : (count ? 0xFFFFFFFF : 0xFF898989);
+                draw(font, x, y, color, 0xFF000000, label);
                 const int markerY = y + height * 16 / 480;
                 if (ArsenalEntryInHand(entry, 0)) draw(font, x - width / 125, markerY,
                     rightColor, 0xFF000000, ModLocalize("Arsenal Right Hand", false));
@@ -813,6 +1037,7 @@ void DrawArsenalHud(DWORD now) {
 }
 
 void TickConventionalArsenal(BYTE* game) {
+    SyncArsenalFade();
     if (!ArsenalEnabled() ||
         (IsStandaloneChallengeLevel((const char*)G_CURRENT_LEVEL) &&
          (!CurrentChallengeAllowsArsenal() || ActiveChallengeCharacter() != ChallengeRayne))) {
@@ -854,6 +1079,7 @@ void TickConventionalArsenal(BYTE* game) {
         for (auto& hand : g_arsenal.hands)
             if (!hand) hand = BloodSlot;
     }
+    GrantChallengeStartingGuns();
     TickDroppedGuns(ArsenalField<float>(game, 0x3D8));
     auto input = ReadArsenalInput();
     input.fire = ArsenalField<int>(rayne, 0x3A98) == 1;
@@ -868,6 +1094,7 @@ void TickConventionalArsenal(BYTE* game) {
         g_arsenal.wheel = true;
         auto* right = EquippedConventional(0);
         g_arsenal.preview = right ? BloodModes + ArsenalField<unsigned>(right, 0x1CC) : CurrentBloodMode();
+        ProbeArsenalGuns(rayne); // temp diag: dump on wheel open
     }
     if (g_arsenal.wheel) {
         ArsenalField<int>(rayne, 0x3A88) = 0;
@@ -882,10 +1109,22 @@ void TickConventionalArsenal(BYTE* game) {
                 if (angle < 0.f) angle += 6.2831853f;
                 g_arsenal.preview = (unsigned)(angle * (WheelEntries / 6.2831853f) + .5f) % WheelEntries;
             }
-            if (input.drop && !old.drop) RemoveArsenalEntry(g_arsenal.preview, true);
-            else if (input.stow && !old.stow) RemoveArsenalEntry(g_arsenal.preview, false);
-            else if (input.equip && !old.equip) EquipArsenalEntry(g_arsenal.preview);
+            for (unsigned hand = 0; hand < 2; ++hand) {
+                const bool held = hand ? input.equipLeft : input.equipRight;
+                const bool was = hand ? old.equipLeft : old.equipRight;
+                if (held && !was) {
+                    g_arsenal.holdStart[hand] = now;
+                    g_arsenal.holdDropped[hand] = false;
+                }
+                if (held && !g_arsenal.holdDropped[hand] &&
+                    now - g_arsenal.holdStart[hand] >= 450) {
+                    DropArsenalHand(hand);
+                    g_arsenal.holdDropped[hand] = true;
+                }
+                if (!held && was && !g_arsenal.holdDropped[hand]) TapArsenalHand(hand);
+            }
         } else g_arsenal.wheel = false;
+        if (PhotoKey(VK_F10)) ProbeArsenalGuns(rayne);
         return;
     }
 
@@ -914,22 +1153,19 @@ void TickConventionalArsenal(BYTE* game) {
                     rayne, HandSlots[hand], g_arsenal.hands[1] != 0, g_arsenal.aimPoints[hand]);
     }
     if (firing) {
-        bool fired[2] = {};
         bool loaded = false;
         for (unsigned hand = 0; hand < 2; ++hand) {
             auto* gun = EquippedConventional(hand);
             if (!gun) continue;
             loaded |= ArsenalField<int>(gun, 0x29C) > 0;
             const int type = ArsenalField<int>(gun, 0x1CC);
-            const bool automatic = type == 2 || type == 5 || type == 6;
+            const bool automatic = type == 2;
             if (!old.fire || automatic)
-                fired[hand] = FireConventionalGun(gun, HandSlots[hand],
+                FireConventionalGun(gun, HandSlots[hand],
                     g_arsenal.hasAimPoint[hand] ? &g_arsenal.aimPoints[hand] : nullptr);
         }
-        // Preserve the animation that drives native blood fire in a mixed loadout.
-        if ((fired[0] || fired[1]) && !BloodInHand(0) && !BloodInHand(1))
-            PlayConventionalAnimation(rayne, fired[0] ? "locked_gun_fire_right" : "locked_gun_fire_left");
-        else if (!old.fire && !loaded) SetArsenalNotice("Arsenal Empty", now);
+        // The native arm controller aims independently of locomotion.
+        if (!old.fire && !loaded) SetArsenalNotice("Arsenal Empty", now);
     }
     if (g_arsenal.drawn)
         for (unsigned hand = 0; hand < 2; ++hand)
@@ -939,6 +1175,8 @@ void TickConventionalArsenal(BYTE* game) {
 void SuspendArsenalWheel() {
     g_arsenal.wheel = false;
     g_arsenal.primed = false;
+    g_arsenal.holdDropped[0] = g_arsenal.holdDropped[1] = false;
+    RestoreArsenalFade();
 }
 
 void DrawConventionalArsenalHud(BYTE* game) {
