@@ -542,23 +542,14 @@ def main():
     print("scb    ->", os.path.basename(out_scb))
 
 
-# lvls[2] "All Weapons" variants: two copies of every conventional arsenal
-# type on a ring around the start point, so the enhanced-gun-combat pickup
-# collects the whole wheel during the first frames. Types 0-2 keep exact
-# stock stats; the content-cut types 3-8 borrow proven models and bullet
-# ammoTypes (the native launcher content was never shipped), so every
-# wheel entry is a functional weapon.
+# "All Weapons" uses the three stock CGun types supported by the wheel.
+# The engine resolves models by gunType when resetting an arena, so a
+# borrowed modelName cannot make the cut weapon types safe to load.
 ALLGUN_SPECS = [
     # gunType, model, ammoType, fireRate, range
     (0, "weapon_gun_automag.SMF", 21, 2, 75),
     (1, "weapon_gun_shotgun.SMF", 14, 1, 200),
     (2, "weapon_gun_uzi.SMF", 22, 5, 300),
-    (3, "weapon_gun_automag.SMF", 21, 1, 75),
-    (4, "weapon_gun_shotgun.SMF", 14, 1, 200),
-    (5, "weapon_gun_uzi.SMF", 22, 5, 300),
-    (6, "weapon_gun_uzi.SMF", 22, 8, 60),
-    (7, "weapon_gun_automag.SMF", 21, 1, 400),
-    (8, "weapon_gun_automag.SMF", 21, 1, 500),
 ]
 ALLGUN_MODELS = ("weapon_gun_automag.SMF", "weapon_gun_shotgun.SMF",
                  "weapon_gun_uzi.SMF")
@@ -586,7 +577,7 @@ ALLGUN_BLOCK = (
 
 
 def inject_allguns(level, pos):
-    """Add the 18 "All Weapons" guns on a ring around pos ("x,y,z").
+    """Add two actors per supported weapon type around pos ("x,y,z").
 
     Returns (level, names); callers may append the names to the start warp
     list. Guns placed at the warp destination need no warp themselves."""
@@ -595,7 +586,7 @@ def inject_allguns(level, pos):
     n = 0
     for gtype, model, ammo, rate, rng in ALLGUN_SPECS:
         for _ in range(2):
-            a = 2 * math.pi * n / 18.0
+            a = 2 * math.pi * n / (2 * len(ALLGUN_SPECS))
             gpos = "%.4g,%.6g,%.4g" % (hx + 1.4 * math.cos(a), hy,
                                        hz + 1.4 * math.sin(a))
             blocks.append(ALLGUN_BLOCK % (n, gpos, model, ammo, rate,

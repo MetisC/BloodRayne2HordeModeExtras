@@ -69,14 +69,20 @@ ARENAS = [
         "lvl": "A3_SHROUDTOWER_ROOF.LVL",
         "trigger": "SpawnTrigger0",
         "wp": "WP_Beginning",
-        # Facing the roof center, opposite of the stock waypoint direction.
-        "start_orient": "0,0,0",
+        # Rayne's position and heading at the start of the stock Ferril fight.
+        "start": "7.52097,972.09,6.34379",
+        "start_orient": "0,0,0.905335",
+        "trigger_pos": "0,972.09,0",
         "recovery": (29, 22),
         "disable_actors": ("WP_IntroCineWalkto1",),
         "emitters": 6,
-        "spawn_positions": {"SpawnFPM3": "10,935.656,35",
-                            "SpawnFPM4": "5,935.656,45",
-                            "SpawnFPF2": "0,935.656,30"},
+        # Give each emitter clearance above the upper deck for floor settling.
+        "spawn_positions": {"SpawnFPM1": "26,976.156,20",
+                            "SpawnFPF1": "24,976.156,-16",
+                            "SpawnFPM2": "0,976.156,-24",
+                            "SpawnFPM3": "-24,976.156,-12",
+                            "SpawnFPM4": "-24,976.156,14",
+                            "SpawnFPF2": "0,976.156,24"},
         "boundary_classes": "CMainCharacter|CLPunk",
         "keep_triggers": (),
         "music": "music_wavefight2_loop.wav",
@@ -228,7 +234,7 @@ PERIMETERS = {
     "chb_mansion_roof": (-53, 130, -5, 29, 227),
     "chb_bar": (-39, 23, 39.53, 539, 614),
     "chb_meatpacking_arena": (-183, -61, 0, 443, 532),
-    "chb_shroud_roof": (-76, 74, 935.65, -71, 70),
+    "chb_shroud_roof": (-36, 39, 972.09, -33, 33),
     "chb_insect_plaza": (295, 482, 0, -773, -596),
     "chb_woodchipper": (969, 1053, 0, -331, -144),
 }
@@ -279,6 +285,9 @@ def main():
         for emitter, position in cfg.get("spawn_positions", {}).items():
             original = make_arena.actor_field(
                 original, "CSpawn", emitter, "pos", position)
+        if "trigger_pos" in cfg:
+            original = make_arena.actor_field(
+                original, "CSpawnTrigger", cfg["trigger"], "pos", cfg["trigger_pos"])
         for key, field in (("start", "pos"), ("start_orient", "orient")):
             if key in cfg:
                 original = make_arena.actor_field(original, "CWayPoint", cfg["wp"], field, cfg[key])

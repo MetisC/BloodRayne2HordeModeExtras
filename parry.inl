@@ -361,14 +361,6 @@ void __fastcall HookParryInput(BYTE* game, void*) {
         g_deflectedHit = {};
 }
 
-bool CanParryAttacker(BYTE* actor) {
-    const DWORD* vtable = *(const DWORD**)actor;
-    if (vtable[2] != 0x5C7910 || vtable[0x200 / 4] != 0x5BAB60 ||
-        vtable[0x130 / 4] != 0x5BBA50)
-        return false;
-    return ((int (__thiscall*)(BYTE*))0x5BBA50)(actor) == 0;
-}
-
 struct ParryVec { float x, y, z; };
 
 bool CombatEffectCached(const char* name) {
@@ -488,8 +480,9 @@ int __cdecl TryParry(BYTE* rayne, BYTE* hit) {
           ((BYTE (__cdecl*)(int))0x5498A0)(state)) ||
         ((bool (__thiscall*)(BYTE*))0x660DA0)(rayne))
         rejected = "ineligible-state";
-    if (!rejected && (!attacker || !*(void**)G_SITUATION || !CanParryAttacker(attacker)))
-        rejected = "unsupported-attacker";
+    // Judge the incoming melee hit, regardless of the enemy's class.
+    if (!rejected && (!attacker || attacker == rayne || !*(void**)G_SITUATION))
+        rejected = "invalid-hit-source";
     if (!rejected && ((int (__thiscall*)(BYTE*, const BYTE*))0x668890)(rayne, hit) != 1)
         rejected = "not-frontal";
     LogParry(rejected ? rejected : "accepted", age, kind, severity, state, vtable, hitId, attacker,

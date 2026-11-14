@@ -2,9 +2,12 @@ namespace {
 constexpr DWORD ConventionalGunVtable = 0x6FAA44;
 constexpr DWORD LiveWeaponTag = 0x78A123;
 constexpr DWORD InactiveWeaponTag = 0x6F3874E;
-constexpr int ChallengeStartingRounds = 999;
 // Native CGun types 0..2: Automag, sawed-off shotgun and Uzi.
 constexpr unsigned ConventionalTypes = 3;
+constexpr unsigned UziType = 2;
+constexpr int ConventionalAmmoCapacity[ConventionalTypes] = {160, 60, 240};
+constexpr unsigned ConventionalFireAudio = 0x2E4;
+constexpr unsigned FireLoopHandle = 0x104;
 constexpr unsigned BloodModes = 6;
 constexpr unsigned WheelEntries = ConventionalTypes + BloodModes;
 constexpr unsigned BloodSlot = 0;
@@ -157,9 +160,21 @@ bool MountConventionalGun(BYTE* rayne, BYTE* gun, int hand) {
     return true;
 }
 
+void StopConventionalUziAudio(BYTE* gun) {
+    if (!gun || ArsenalField<DWORD>(gun, 0) != ConventionalGunVtable ||
+        ArsenalField<unsigned>(gun, 0x1CC) != UziType) return;
+    auto* audio = gun + ConventionalFireAudio;
+    // CGun::stopFire clears the firing state and ends the burst.
+    ((void (__thiscall*)(BYTE*))0x507AD0)(gun);
+    // The native burst stop can return early if pause invalidated the voice.
+    if (ArsenalField<DWORD>(audio, FireLoopHandle))
+        ((void (__thiscall*)(BYTE*))0x629B60)(audio);
+}
+
 void DropConventionalGun(BYTE* gun) {
     if (!gun || ArsenalField<DWORD>(gun, 0) != ConventionalGunVtable ||
         ArsenalField<BYTE*>(gun, 0x1F4) != g_arsenal.rayne) return;
+    StopConventionalUziAudio(gun);
     const int hand = EquippedGunHand(gun);
     MountConventionalGun(g_arsenal.rayne, gun, hand < 0 ? RightGunHand : hand);
     // CWeapon::drop clears carriedByActor and resets its native physics.
@@ -617,10 +632,15 @@ void SetArsenalNotice(const char* label, DWORD now, int rounds = 0) {
 }
 
 bool StoreConventionalGun(BYTE* gun, unsigned index) {
+    if (index >= ConventionalTypes) return false;
     auto* rayne = g_arsenal.rayne;
     if (!MountConventionalGun(rayne, gun, RightGunHand)) return false;
     ((void (__thiscall*)(BYTE*, BYTE*))0x507FA0)(gun, rayne);
     if (ArsenalField<BYTE*>(gun, 0x1F4) != rayne) return false;
+    auto& capacity = ArsenalField<int>(gun, 0x2A0);
+    auto& rounds = ArsenalField<int>(gun, 0x29C);
+    capacity = ConventionalAmmoCapacity[index];
+    rounds = min(max(0, rounds), capacity);
     for (auto& item : g_arsenal.dropped)
         if (item.gun == gun) item = {};
     g_arsenal.guns[index] = gun;
@@ -660,7 +680,7 @@ void GrantChallengeStartingGuns() {
             continue;
         }
         auto& capacity = ArsenalField<int>(gun, 0x2A0);
-        capacity = max(capacity, ChallengeStartingRounds);
+        capacity = ConventionalAmmoCapacity[index];
         ArsenalField<int>(gun, 0x29C) = capacity;
     }
 }
@@ -880,6 +900,12 @@ void FireConventionalGun(BYTE* gun, unsigned hand) {
     __try {
         nativeCooldown = cooldown;
         AlignConventionalGrip(gun, g_arsenal.rayne, mount);
+        if (type == UziType) {
+            auto* audio = gun + ConventionalFireAudio;
+            const auto loop = ArsenalField<DWORD>(audio, FireLoopHandle);
+            if (loop && !((BYTE (__cdecl*)(DWORD))0x622040)(loop))
+                ((void (__thiscall*)(BYTE*))0x629B60)(audio);
+        }
         ((int (__thiscall*)(BYTE*, float))0x508460)(gun, 1.f);
     } __finally {
         cooldown = nativeCooldown;
@@ -1033,6 +1059,7 @@ void TickConventionalArsenal(BYTE* game) {
         }
     }
     if (!ArsenalGameplayInput(game, rayne)) {
+        StopConventionalUziAudio(g_arsenal.guns[UziType]);
         g_arsenal.wheel = g_arsenal.primed = false;
         return;
     }
@@ -1040,6 +1067,7 @@ void TickConventionalArsenal(BYTE* game) {
     DWORD foreground = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
     if (foreground != GetCurrentProcessId()) {
+        StopConventionalUziAudio(g_arsenal.guns[UziType]);
         g_arsenal.wheel = g_arsenal.primed = false;
         return;
     }
@@ -1066,6 +1094,7 @@ void TickConventionalArsenal(BYTE* game) {
         ProbeArsenalGuns(rayne); // temp diag: dump on wheel open
     }
     if (g_arsenal.wheel) {
+        StopConventionalUziAudio(g_arsenal.guns[UziType]);
         ArsenalField<int>(rayne, 0x3A88) = 0;
         ArsenalField<int>(rayne, 0x3A90) = 0;
         if (input.wheel) {
@@ -1119,6 +1148,9 @@ void TickConventionalArsenal(BYTE* game) {
     }
     const bool firing = conventional && !bladeAttack && input.fire && !g_arsenal.fireBlocked &&
                         (g_arsenal.drawn || !old.fire);
+    auto* uzi = g_arsenal.guns[UziType];
+    if (uzi && (!firing || (uzi != EquippedConventional(0) && uzi != EquippedConventional(1))))
+        StopConventionalUziAudio(uzi);
     if (firing) {
         g_arsenal.drawn = true;
         if (ArsenalField<float>(rayne, 0x82B0) <= 0.f) g_arsenal.aimRequested = true;
@@ -1127,7 +1159,7 @@ void TickConventionalArsenal(BYTE* game) {
             auto* gun = EquippedConventional(hand);
             if (!gun) continue;
             const int type = ArsenalField<int>(gun, 0x1CC);
-            const bool automatic = type == 2;
+            const bool automatic = type == UziType;
             if (!old.fire || automatic)
                 FireConventionalGun(gun, hand);
         }
@@ -1145,6 +1177,7 @@ void TickConventionalArsenal(BYTE* game) {
 }
 
 void SuspendArsenalWheel() {
+    if (ArsenalSceneMatches()) StopConventionalUziAudio(g_arsenal.guns[UziType]);
     g_arsenal.wheel = false;
     g_arsenal.primed = false;
     g_arsenal.holdDropped[0] = g_arsenal.holdDropped[1] = false;

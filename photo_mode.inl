@@ -9,6 +9,8 @@ constexpr DWORD NativeMouseX = 0x5E214B0;
 constexpr DWORD NativeMouseY = 0x5E214B4;
 constexpr WORD PhotoChord = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB;
 constexpr WORD PhotoExitButtons = XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START;
+constexpr WORD PhotoRollLeft = XINPUT_GAMEPAD_X;
+constexpr WORD PhotoRollRight = XINPUT_GAMEPAD_Y;
 
 struct PhotoVec { float x, y, z; };
 struct PhotoPose { PhotoVec position, angles; float fov; };
@@ -34,6 +36,7 @@ DWORD g_photoLastHero;
 BYTE* g_photoLastView;
 PhotoPose g_photoNativePose;
 PhotoPose g_photoPose;
+float g_photoInitialRoll;
 
 template <class T> T& PhotoGlobal(DWORD address) {
     return *reinterpret_cast<T*>(address);
@@ -95,11 +98,13 @@ bool ReadPhotoPad(int slot, PhotoPad& out) {
             PhotoAxis(-PhotoGlobal<float>(pad + 0x2C), 0.24f),
             PhotoAxis(PhotoGlobal<float>(pad + 0x30), 0.26f),
             PhotoAxis(-PhotoGlobal<float>(pad + 0x3C), 0.26f),
-            float((buttons[7] || buttons[5]) - (buttons[6] || buttons[4])),
+            float(buttons[7] != 0) - float(buttons[6] != 0),
             WORD((buttons[2] ? XINPUT_GAMEPAD_B : 0)
                | (buttons[9] ? XINPUT_GAMEPAD_START : 0)
                | (buttons[10] ? XINPUT_GAMEPAD_LEFT_THUMB : 0)
-               | (buttons[11] ? XINPUT_GAMEPAD_RIGHT_THUMB : 0)) };
+               | (buttons[11] ? XINPUT_GAMEPAD_RIGHT_THUMB : 0)
+               | (buttons[0] ? PhotoRollLeft : 0)
+               | (buttons[3] ? PhotoRollRight : 0)) };
     return true;
 }
 
@@ -110,6 +115,14 @@ void MovePhotoCamera(const PhotoPad& pad, LONG mouseX, LONG mouseY, float dt) {
                                6.2831853f);
     pose.angles.x = max(-pitchLimit, min(pitchLimit,
         pose.angles.x - pad.pitch * 1.9f * dt + mouseY * 0.0025f));
+    const bool rollLeft = (pad.buttons & PhotoRollLeft) != 0;
+    const bool rollRight = (pad.buttons & PhotoRollRight) != 0;
+    if (rollLeft && rollRight) {
+        pose.angles.z = g_photoInitialRoll;
+    } else {
+        pose.angles.z = remainderf(pose.angles.z
+            + (float(rollLeft) - float(rollRight)) * 1.4f * dt, 6.2831853f);
+    }
 
     const float right = pad.strafe + PhotoKey('D') - PhotoKey('A');
     const float front = pad.forward + PhotoKey('W') - PhotoKey('S');
@@ -150,6 +163,7 @@ void BeginPhoto(DWORD now, int padSlot, bool fromGameplay) {
         ? g_photoNativePose : PhotoPose{PhotoField<PhotoVec>(view, 4),
                                       PhotoField<PhotoVec>(view, 0x10),
                                       PhotoField<float>(view, 0x1C)};
+    g_photoInitialRoll = g_photoPose.angles.z;
     g_photoPadSlot = padSlot;
     g_photoTickAt = now;
     g_photoExitArmed = g_photoExitPending = g_photoExitReady = false;
